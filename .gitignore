@@ -1,0 +1,13 @@
+target/
+.vscode/
+.classpath
+.project
+.settings
+**/pom.xml.versionsBackup
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+dist/
+build/
