@@ -2,7 +2,7 @@ import Foundation
 import EventKit
 import AppleBridgeProtocol
 
-// PROTOTYPE — Calendar read only. No create/update/delete yet.
+// Calendar read only. No create/update/delete yet.
 // Follows the Reminders shape: main-queue hops under one request Deadline.
 
 func dispatchCalendar(_ request: BridgeRequest, store: EKEventStore) -> BridgeResponse {
@@ -32,30 +32,49 @@ func calendarList(store: EKEventStore, deadline: Deadline) throws -> [CalendarIn
 private func readEvents(
     _ request: BridgeRequest, store: EKEventStore, deadline: Deadline
 ) throws -> EventPage {
+    let query = EventQuery(
+        calendar: request.list ?? request.listId,
+        startAfter: request.startAfter,
+        startBefore: request.startBefore,
+        limit: request.limit)
+    let window = try resolveEventWindow(query)
     let calendars = try onMain(deadline, hop: "calendar lookup") {
         try calendarsForEventQuery(store: store, request: request)
     }
-    let start = Date()
-    // Default window: the next 7 days. A wide window on a big calendar is slow.
-    let end = start.addingTimeInterval(60 * 60 * 24 * 7)
     // Unlike reminders, EventKit's event fetch is SYNCHRONOUS — it returns the
     // array directly rather than calling back. So there is no semaphore hop and
-    // no second Deadline claim here, unlike fetchReminders.
+    // no second Deadline claim here, unlike fetchReminders. The work still runs on
+    // the main queue, which is why the window is width-capped upstream.
     let events = try onMain(deadline, hop: "event read") {
         let predicate = store.predicateForEvents(
-            withStart: start, end: end, calendars: calendars)
+            withStart: window.start, end: window.end, calendars: calendars)
         return store.events(matching: predicate)
     }
     let records = events.map { makeEventRecord($0) }
-    return eventPage(
-        records: records, limit: request.limit ?? 50, calendars: calendars, request: request)
+    return try eventPage(
+        records: records,
+        window: window,
+        scope: eventScope(request: request, calendars: calendars),
+        limit: query.limit)
+}
+
+/// The same trap the reminder side guards: a caller who asks about "my calendar"
+/// and gets one calendar's events. `default calendar` is called out by name so the
+/// note can fire on an empty page.
+private func eventScope(request: BridgeRequest, calendars: [EKCalendar]) -> String {
+    let query = request.list ?? request.listId
+    if let query, isAllLists(query) {
+        return "all \(calendars.count) calendars"
+    }
+    let title = calendars.first?.title ?? "unknown"
+    return query == nil ? "default calendar \"\(title)\"" : "calendar \"\(title)\""
 }
 
 private func calendarsForEventQuery(
     store: EKEventStore, request: BridgeRequest
 ) throws -> [EKCalendar] {
     store.refreshSourcesIfNecessary()
-    let all = store.calendars(for: .event)
+    let all = store.calendars(for: .event).filter { $0.title != "Recently Deleted" }
     if let query = request.list ?? request.listId, isAllLists(query) {
         guard !all.isEmpty else { throw ReminderFailure("No calendars are available.") }
         return all
@@ -76,7 +95,12 @@ private func calendarsForEventQuery(
 
 private func makeEventRecord(_ event: EKEvent) -> EventRecord {
     EventRecord(
-        id: event.eventIdentifier ?? "",
+        // calendarItemIdentifier, NOT eventIdentifier. Apple documents the latter
+        // as changing when an event moves between calendars and possibly on sync,
+        // so it is not a handle a caller can come back with. EKEvent is an
+        // EKCalendarItem, so the stable identifier is available — and it is what
+        // the reminder side already uses.
+        id: event.calendarItemIdentifier,
         title: event.title ?? "",
         notes: event.notes ?? "",
         calendar: event.calendar?.title ?? "",
@@ -86,31 +110,4 @@ private func makeEventRecord(_ event: EKEvent) -> EventRecord {
         allDay: event.isAllDay,
         location: event.location ?? "",
         url: event.url?.absoluteString)
-}
-
-/// Sort by start, all-day first, then title. No filter grammar yet — the
-/// prototype is here to size the work, not to ship a query language.
-private func eventPage(
-    records: [EventRecord],
-    limit: Int,
-    calendars: [EKCalendar],
-    request: BridgeRequest
-) -> EventPage {
-    let capped = min(max(limit, 1), 100)
-    let sorted = records.sorted { a, b in
-        if a.start != b.start { return (a.start ?? "") < (b.start ?? "") }
-        return a.title < b.title
-    }
-    let query = request.list ?? request.listId
-    let scope: String
-    if let query, isAllLists(query) {
-        scope = "all \(calendars.count) calendars"
-    } else {
-        scope = "calendar \"\(calendars.first?.title ?? "unknown")\""
-    }
-    return EventPage(
-        events: Array(sorted.prefix(capped)),
-        matched: sorted.count,
-        truncated: sorted.count > capped,
-        scope: scope)
 }

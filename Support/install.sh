@@ -26,24 +26,56 @@ MCP_BIN=".build/debug/apple-bridge-mcp"
 [ -x "$HELPER_BIN" ] || { echo "missing built product: $HELPER_BIN" >&2; exit 1; }
 [ -x "$MCP_BIN" ] || { echo "missing built product: $MCP_BIN" >&2; exit 1; }
 
-echo "==> installing binaries to $BINDIR"
+SIGN_IDENTITY="apple-bridge Dev Signing"
+SIGN_ROOT="3c6196c867280334c4e6f4a25121c35b09b03ff6"
+
+# A locked keychain makes `security find-identity` still list the identity but
+# marked CSSMERR_TP_NOT_TRUSTED, and makes codesign fail with errSecInternalComponent.
+# Diagnose it here rather than letting the failure surface as a silent ad-hoc binary.
+if ! security show-keychain-info "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+==> login keychain is locked, so the signing identity is unreachable.
+
+  security unlock-keychain $HOME/Library/Keychains/login.keychain-db
+
+Then re-run this script. Nothing has been installed and the running agent has not
+been touched.
+EOF
+    exit 1
+fi
+
+# Sign to a staging path and verify BEFORE replacing the installed binary or
+# booting out the running agent. A signing failure must never leave a
+# mis-signed helper in place of a working one: an ad-hoc signature changes the
+# designated requirement to the cdhash, which silently invalidates the TCC grant.
+STAGED="$BASE/.helper.staged"
 mkdir -p "$BINDIR" "$BASE"
 chmod 700 "$BASE"
-# Stop the running agent before overwriting the binary it executes.
+cp "$HELPER_BIN" "$STAGED"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+    echo "==> codesign helper with stable identity: $SIGN_IDENTITY"
+    codesign --force --sign "$SIGN_IDENTITY" "$STAGED"
+    if ! codesign -d -r- "$STAGED" 2>&1 | grep -qi "$SIGN_ROOT"; then
+        echo "==> signed, but the designated requirement does not anchor to the identity of" >&2
+        echo "    record (root $SIGN_ROOT). Refusing to install — this would re-prompt on" >&2
+        echo "    every rebuild. Do NOT mint a second cert with the same CN." >&2
+        rm -f "$STAGED"
+        exit 1
+    fi
+else
+    echo "==> ad-hoc codesign helper (identity '$SIGN_IDENTITY' not found; expect a TCC re-prompt on every rebuild)" >&2
+    codesign --force --sign - "$STAGED"
+fi
+
+echo "==> installing binaries to $BINDIR"
+# Only now that the signature is known good: stop the running agent and swap in
+# the signed binary.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 rm -f "$BASE/helper.sock" "$BASE/apple-bridge-helper"
-cp "$HELPER_BIN" "$HELPER"
+mv "$STAGED" "$HELPER"
 cp "$MCP_BIN" "$MCP"
 chmod 755 "$HELPER" "$MCP"
 
-SIGN_IDENTITY="apple-bridge Dev Signing"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
-    echo "==> codesign helper with stable identity: $SIGN_IDENTITY"
-    codesign --force --sign "$SIGN_IDENTITY" "$HELPER"
-else
-    echo "==> ad-hoc codesign helper (identity '$SIGN_IDENTITY' not found; expect a TCC re-prompt on every rebuild)" >&2
-    codesign --force --sign - "$HELPER"
-fi
 # The MCP binary never touches EventKit, so an ad-hoc signature is enough to run.
 echo "==> ad-hoc codesign mcp"
 codesign --force --sign - "$MCP"

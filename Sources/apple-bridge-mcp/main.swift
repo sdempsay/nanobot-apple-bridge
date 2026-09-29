@@ -194,16 +194,22 @@ let serverName = "apple-bridge"
 let serverVersion = "0.3.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 let serverInstructions =
-    "This server reads and writes the macOS Reminders of the user running the process. "
+    "This server reads the macOS Reminders and Calendar of the user running the process. "
     + "RULE FOR EVERY READ: each field you send NARROWS the result. Omit a field to apply "
     + "no filter. A permissive-looking value (a wide date range, one letter, 'none', false) "
     + "is a filter, not a no-op. "
     + "To read everything on every list, call reminders_all with no arguments. "
-    + "Call lists to get list names and ids. "
+    + "To read everything coming up, call events_upcoming with no arguments. "
+    + "Call lists to get list names and ids, and calendars to get calendar names and ids. "
     + "Use the reminder id from a read or create result for reminders_update and "
     + "reminders_delete. Do not invent ids. Delete removes the reminder from its list. "
     + "The flag cannot be read or changed. "
-    + "Recurrence, alarms, tags, URLs, locations, and subtasks are unavailable."
+    + "Calendar events are read only — there is no create, update, or delete for them, and "
+    + "an event id is only good for identifying that event in a later read. Event records "
+    + "carry location and url; reminders do not. "
+    + "Every event read is windowed by start time: if you send no start_after or "
+    + "start_before you get the next 7 days, and the result's window field says so. "
+    + "Recurrence, alarms, tags, and subtasks are unavailable."
 
 let toolDefinitions: JSONValue = .array([
     tool(
@@ -283,21 +289,43 @@ let toolDefinitions: JSONValue = .array([
         objectSchema([
             "id": field("string", "Reminder id from reminders_read or reminders_create."),
         ], required: ["id"])),
-    // PROTOTYPE: calendar read only.
+    // Calendar read only.
     tool(
         "calendars",
         "List the user's calendars. Each entry has id (an EventKit calendarIdentifier "
             + "— use this to address a calendar), name, and isDefault. Takes no arguments.",
         objectSchema([:])),
     tool(
+        "events_upcoming",
+        "Read every event coming up in the next 7 days, from EVERY calendar, in one call "
+            + "with no arguments. Use this for 'what's on my calendar' or 'what's coming up'; "
+            + "it cannot be narrowed or truncated by mistake. Each record carries calendar and "
+            + "calendar_id. Soonest first, then by title. Up to 100 records; read matched, "
+            + "truncated, and window in the result.",
+        objectSchema([:])),
+    tool(
         "events_read",
-        "Read events from the next 7 days. RULE: every field you send NARROWS the "
-            + "result — to read everything, omit it. Omitting calendar reads the "
-            + "default calendar; calendar: \"all\" reads every visible calendar. "
-            + "The window is fixed at 7 days from now; there is no date filter yet.",
+        "Read events in a chosen date range. "
+            + "RULE: every field you send NARROWS the result — omit a field to apply no "
+            + "narrowing. A wide date range is a filter, not a no-op. "
+            + "Omitting calendar reads the DEFAULT calendar only; send calendar: \"all\" for "
+            + "every visible calendar, which is almost always what you want. "
+            + "Omitting BOTH start_after and start_before reads the next 7 days — the result's "
+            + "window field always names the range that was searched, and an empty page means "
+            + "\"nothing starts in that window\", not \"your calendar is empty\". "
+            + "start_after never reaches into the past: it means \"from this time on\". "
+            + "A window wider than 62 days is refused rather than trimmed, so read a shorter "
+            + "range. Events are read only; there is no create, update, or delete. "
+            + "Recurring events appear once per occurrence.",
         objectSchema([
-            "calendar": field("string", "OPTIONAL — omit for the default calendar. "
+            "calendar": field("string", "OPTIONAL — omit for the default calendar only. "
                 + "Calendar name, calendar id, or \"all\" for every visible calendar."),
+            "start_after": field("string", "OPTIONAL — omit to start from now. Inclusive lower "
+                + "bound on event start. A bare date covers that whole local day. This never "
+                + "searches the past."),
+            "start_before": field("string", "OPTIONAL — omit for a 7-day lookahead from "
+                + "start_after. Inclusive upper bound on event start. A bare date covers that "
+                + "whole local day."),
             "limit": field("integer", "OPTIONAL — omit for 50. Page size from 1 to 100."),
         ])),
 ])
@@ -463,17 +491,28 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
                 command: .delete,
                 reminderId: try stringField(arguments, "id") ?? ""),
             retry: false)
-    // PROTOTYPE: calendar read only.
+    // Calendar read only.
     case "calendars":
         try rejectUnknown(arguments, allowed: [])
         return ToolCall(request: BridgeRequest(command: .calendars), retry: true)
+    case "events_upcoming":
+        // No arguments to get wrong: every calendar, the default forward window.
+        try rejectUnknown(arguments, allowed: [])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .events,
+                list: allListsSentinel,
+                limit: 100),
+            retry: true)
     case "events_read":
-        try rejectUnknown(arguments, allowed: ["calendar", "limit"])
+        try rejectUnknown(arguments, allowed: ["calendar", "start_after", "start_before", "limit"])
         return ToolCall(
             request: BridgeRequest(
                 command: .events,
                 list: try optionalField(arguments, "calendar"),
-                limit: try limitField(arguments, "limit")),
+                limit: try limitField(arguments, "limit"),
+                startAfter: try optionalField(arguments, "start_after"),
+                startBefore: try optionalField(arguments, "start_before")),
             retry: true)
     default:
         throw ArgFailure("unknown tool '\(name)'")

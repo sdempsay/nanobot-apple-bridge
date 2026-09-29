@@ -25,6 +25,10 @@ public enum ReminderText {
     public static let flagUnavailable =
         "The flag is not available through EventKit — omit the flagged field and retry."
     public static let defaultPageSize = 50
+    public static let invertedEventWindow = "start_after is later than start_before."
+    public static let eventWindowTooWide =
+        "The event window is wider than \(maxEventWindowDays) days. Read a shorter range — "
+        + "start_after and start_before can each be omitted, and the window never starts in the past."
 }
 
 /// A local calendar minute. All-day values use 00:00 as the sort point.
@@ -422,6 +426,158 @@ private func pageNote(
     }
     if hasWindow && undatedExcluded > 0 {
         parts.append("\(undatedExcluded) reminder(s) with no due date were excluded by the due window — omit due_after/due_before to include them")
+    }
+    return parts.isEmpty ? nil : parts.joined(separator: "; ")
+}
+
+// MARK: - Event read rules
+//
+// EventKit filters events with a predicate, not by fetching everything and
+// filtering afterwards, so unlike Reminders the `records` handed to `eventPage`
+// are already the matched set. The rules here are about the one thing EventKit
+// *cannot* express to the caller: the window it actually searched, and the fact
+// that a defaulted window is a real narrowing rather than a neutral default.
+
+public let maxEventWindowDays = 62
+public let defaultEventWindowDays = 7
+
+/// A local calendar minute turned into an absolute instant. Used for the event
+/// window, where EventKit needs real `Date`s rather than the minute pairs the
+/// reminder rules compare.
+public func date(for minute: DueMinute, zone: TimeZone = .current) -> Date? {
+    var components = DateComponents()
+    components.year = minute.year
+    components.month = minute.month
+    components.day = minute.day
+    components.hour = minute.hour
+    components.minute = minute.minute
+    return gregorian(zone).date(from: components)
+}
+
+public struct EventQuery {
+    public var calendar: String?
+    public var startAfter: String?
+    public var startBefore: String?
+    public var limit: Int?
+
+    public init(calendar: String? = nil, startAfter: String? = nil, startBefore: String? = nil, limit: Int? = nil) {
+        self.calendar = calendar
+        self.startAfter = startAfter
+        self.startBefore = startBefore
+        self.limit = limit
+    }
+}
+
+/// The range that was actually searched, and what the caller did to get there.
+public struct EventWindow: Equatable {
+    /// Inclusive lower bound, in the helper's local zone.
+    public var start: Date
+    /// Exclusive upper bound for the EventKit predicate. `end` is the last searched
+    /// *minute*, so it carries one extra minute; see `resolveEventWindow`.
+    public var end: Date
+    /// The same range as the caller would write it, for the result to quote back.
+    public var display: String
+    /// True when the caller named neither bound, so the window is a narrowing choice
+    /// this code made on their behalf and the result has to say so.
+    public var isDefaulted: Bool
+    /// The caller's own bounds, for `filters`. Empty when both were omitted.
+    public var filters: [String: String]?
+}
+
+/// Resolve the event window. An omitted bound is never widened: no lower bound
+/// means "from now", not "from the beginning of time", and no upper bound means
+/// a bounded lookahead rather than an unbounded fetch. The width is capped
+/// because the fetch is synchronous on the main queue — an unbounded window is
+/// a UI stall, so it is refused rather than silently truncated.
+public func resolveEventWindow(
+    _ query: EventQuery,
+    now: Date = Date(),
+    zone: TimeZone = .current
+) throws -> EventWindow {
+    let after = try query.startAfter.map { try parseDue($0, zone: zone) }
+    let before = try query.startBefore.map { try parseDue($0, zone: zone) }
+    if let after, let before, after.span().start > before.span().end {
+        throw ReminderFailure(ReminderText.invertedEventWindow)
+    }
+    let start = after.flatMap { date(for: $0.span().start, zone: zone) } ?? now
+    let lastMinute = before.flatMap { date(for: $0.span().end, zone: zone) }
+        ?? now.addingTimeInterval(Double(defaultEventWindowDays) * 86400)
+    if lastMinute.timeIntervalSince(start) > Double(maxEventWindowDays) * 86400 {
+        throw ReminderFailure(ReminderText.eventWindowTooWide)
+    }
+    var applied: [String: String] = [:]
+    switch (after, before) {
+    case (.some, .some):
+        applied["start"] = "\(query.startAfter ?? "")..\(query.startBefore ?? "")"
+    case (.some, .none):
+        applied["start_after"] = query.startAfter ?? ""
+    case (.none, .some):
+        applied["start_before"] = query.startBefore ?? ""
+    case (.none, .none):
+        break
+    }
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = zone
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+    return EventWindow(
+        start: start,
+        end: lastMinute.addingTimeInterval(60),
+        display: "\(formatter.string(from: start))..\(formatter.string(from: lastMinute))",
+        isDefaulted: after == nil && before == nil,
+        filters: applied.isEmpty ? nil : applied)
+}
+
+public func eventPage(
+    records: [EventRecord],
+    window: EventWindow,
+    scope: String,
+    limit: Int?,
+    pageSize: Int = ReminderText.defaultPageSize
+) throws -> EventPage {
+    let capped = try pageLimit(limit, pageSize: pageSize)
+    // Undated last, then start, then title — the same key the reminder page uses.
+    // Comparing raw start strings would sort a nil "" ahead of every real date.
+    let sorted = records.sorted { a, b in
+        let left = a.start ?? ""
+        let right = b.start ?? ""
+        if (left.isEmpty ? 1 : 0, left, a.title) != (right.isEmpty ? 1 : 0, right, b.title) {
+            return (left.isEmpty ? 1 : 0, left, a.title) < (right.isEmpty ? 1 : 0, right, b.title)
+        }
+        return a.id < b.id
+    }
+    return EventPage(
+        events: Array(sorted.prefix(capped)),
+        matched: sorted.count,
+        truncated: sorted.count > capped,
+        scope: scope,
+        window: window.display,
+        filters: window.filters,
+        note: eventPageNote(
+            matched: sorted.count, scope: scope, window: window, truncated: sorted.count > capped))
+}
+
+/// Only says something when the result is likely to be misread. Unlike the
+/// reminder page there is no matched-vs-fetched gap to explain, because
+/// EventKit did the filtering — so the two real traps are a defaulted window
+/// and a defaulted calendar, both of which turn "not here" into "not at all".
+private func eventPageNote(
+    matched: Int, scope: String, window: EventWindow, truncated: Bool
+) -> String? {
+    var parts: [String] = []
+    if matched == 0 {
+        parts.append(
+            "no event starts inside \(window.display); that is a statement about the window, "
+            + "not about the calendar")
+        if window.isDefaulted {
+            parts.append("pass start_after and start_before to search other dates")
+        }
+        if scope.hasPrefix("default calendar") {
+            parts.append("this read covered only \(scope); call events_upcoming for every calendar")
+        }
+    } else if truncated {
+        parts.append("the page was capped; more events match inside \(window.display)")
     }
     return parts.isEmpty ? nil : parts.joined(separator: "; ")
 }

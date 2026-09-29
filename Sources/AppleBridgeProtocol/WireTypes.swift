@@ -34,6 +34,12 @@ public struct BridgeRequest: Codable {
     public var limit: Int?
     public var clearDue: Bool?
     public var flagged: Bool?
+    /// Inclusive lower bound on event start, as a date or local datetime. Absent
+    /// means "from now" — never "from the beginning of time".
+    public var startAfter: String?
+    /// Inclusive upper bound on event start. Absent means a bounded lookahead,
+    /// not an unbounded fetch.
+    public var startBefore: String?
 
     public init(
         command: BridgeCommand,
@@ -51,7 +57,9 @@ public struct BridgeRequest: Codable {
         priority: String? = nil,
         limit: Int? = nil,
         clearDue: Bool? = nil,
-        flagged: Bool? = nil
+        flagged: Bool? = nil,
+        startAfter: String? = nil,
+        startBefore: String? = nil
     ) {
         self.command = command
         self.listId = listId
@@ -69,6 +77,8 @@ public struct BridgeRequest: Codable {
         self.limit = limit
         self.clearDue = clearDue
         self.flagged = flagged
+        self.startAfter = startAfter
+        self.startBefore = startBefore
     }
 }
 
@@ -212,16 +222,32 @@ public struct EventPage: Codable, Equatable {
     public var matched: Int
     public var truncated: Bool
     public var scope: String?
+    /// The range that was actually searched, always present. Every event read is
+    /// windowed, so a caller who asked about "October" and sent no bounds must be
+    /// able to see that they were served a default window instead.
+    public var window: String?
+    /// Only the caller's own narrowing. An empty window is a narrowing this code
+    /// chose, which is why it is described in `window` and not listed here.
+    public var filters: [String: String]?
+    /// One line, present only when the result is likely to surprise the caller —
+    /// an empty page whose emptiness is about the window rather than the calendar.
+    public var note: String?
 
     public init(
         events: [EventRecord],
         matched: Int,
         truncated: Bool,
-        scope: String? = nil
+        scope: String? = nil,
+        window: String? = nil,
+        filters: [String: String]? = nil,
+        note: String? = nil
     ) {
         self.events = events
         self.matched = matched
         self.truncated = truncated
         self.scope = scope
+        self.window = window
+        self.filters = filters
+        self.note = note
     }
 }
