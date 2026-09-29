@@ -25,15 +25,15 @@ Two Swift executables plus a shared protocol library (see PRD.md):
 ```sh
 swift build                                   # clean build, no warnings expected
 bash Support/install.sh                       # build, install to ~/.local/bin, sign, bootstrap LaunchAgent
-launchctl print gui/$(id -u)/com.org.dempsay.apple-bridge.helper | grep -E "state|pid"
+launchctl print gui/$(id -u)/org.dempsay.apple-bridge.helper | grep -E "state|pid"
 cat ~/Library/Application\ Support/apple-bridge/helper.log
 ```
 
 Remove the agent:
 
 ```sh
-launchctl bootout gui/$(id -u)/com.org.dempsay.apple-bridge.helper
-rm ~/Library/LaunchAgents/com.org.dempsay.apple-bridge.helper.plist
+launchctl bootout gui/$(id -u)/org.dempsay.apple-bridge.helper
+rm ~/Library/LaunchAgents/org.dempsay.apple-bridge.helper.plist
 ```
 
 MCP handshake smoke test (no helper required; expects initialize + tools/list):
@@ -185,7 +185,35 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
       `Deadline` via `readFrame` (25s helper / 30s client). Tests: `FrameReadTests` (5)
       — silent peer, partial frame then silence, closed peer, spent budget, and that a
       frame boundary does not eat the next one. 27 tests total.
-- [ ] Milestone 3: Calendar commands (second grant flow)
+- [x] 2026-09-29: Milestone 3a — Calendar read. `calendars`, `events_read` (with
+      `start_after` / `start_before`), and `events_upcoming` (zero arguments). Second
+      TCC grant required one human click, same as Reminders. `EventRecord.id` uses
+      `calendarItemIdentifier`, not `eventIdentifier` — Apple documents the latter as
+      changing when an event moves calendars or re-syncs. `EventPage` reports `window`,
+      `filters`, and `note`. 52 tests.
+- [ ] Milestone 3b: `events_create` / `events_update` / `events_delete`, refusing
+      recurring events. See TODO.md row 16 / issue #11.
+
+**Calendar grant flow — `tccutil` cannot do this.** It addresses
+LaunchServices-registered bundles; the helper is a bare executable whose plist is
+embedded via `-sectcreate __TEXT __info_plist`, which is not one. Both
+`org.dempsay.…` and `com.org.dempsay.…` return `No such bundle identifier
+(OSStatus error -10814)`. The real flow is `bash Support/install.sh` then click
+Allow on the prompt. `Support/grant-calendar-permission.sh` was written on the
+wrong assumption and removed in 283cd4e — do not recreate it.
+
+**Locked keychain is a real failure mode.** If the login keychain is locked,
+`codesign` fails with `errSecInternalComponent` and
+`security find-identity` still lists the identity but marked
+`CSSMERR_TP_NOT_TRUSTED`. `install.sh` now checks for this up front and refuses
+before touching the running agent, because the failure it used to cause was
+silent: the freshly-linked ad-hoc binary got copied into place, collapsing the
+designated requirement to the cdhash and invalidating the TCC grant. Unlock with
+`security unlock-keychain ~/Library/Keychains/login.keychain-db` and re-run.
+
+**Naming.** Every identifier this repo owns starts `org.dempsay`. The
+LaunchAgent label was `com.org.dempsay.…` until 741cce2; `install.sh` now retires
+that label on every run so a leftover agent cannot compete for the socket.
 
 Verified end-to-end sample (2026-09-28): `tools/call lists` returned the user's
 four lists (Reminders [default], Family, Work, For Shawn) with calendarIdentifiers.

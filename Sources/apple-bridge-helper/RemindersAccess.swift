@@ -17,7 +17,7 @@ func dispatchReminder(_ request: BridgeRequest, store: EKEventStore) -> BridgeRe
         return respond { try updateReminder(request, store: store, deadline: deadline) }
     case .delete:
         return respond { try deleteReminder(request, store: store, deadline: deadline) }
-    case .calendars, .events:
+    case .calendars, .events, .eventCreate, .eventUpdate, .eventDelete:
         return dispatchCalendar(request, store: store)
     }
 }

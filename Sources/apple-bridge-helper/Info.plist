@@ -16,7 +16,7 @@
     <true/>
     <key>NSRemindersFullAccessUsageDescription</key>
     <string>apple-bridge reads and writes Reminders on behalf of connected agents.</string>
-    <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>apple-bridge reads and writes Calendar events on behalf of connected agents. Calendar commands ship in a later milestone.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>apple-bridge reads your Calendar events, and creates, edits, and deletes single events on your behalf. Recurring events can be read but not changed.</string>
 </dict>
 </plist>

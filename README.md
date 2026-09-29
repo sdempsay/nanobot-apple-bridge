@@ -116,9 +116,9 @@ reminders_all → 19 reminders, 6 open, 4 lists, one call
 Three Swift targets in one package:
 
 - `AppleBridgeProtocol` — wire types and the pure logic worth testing without
-  EventKit: the `sockaddr_un` builder, `writeAll`, `readFrame`, the Reminders
-  rules, and `Deadline` (one time budget per request, threaded through every
-  waiting hop).
+  EventKit: the `sockaddr_un` builder, `writeAll`, `readFrame`, the Reminders and
+  event rules, and `Deadline` (one time budget per request, threaded through
+  every waiting hop).
 - `apple-bridge-helper` — the only target that links EventKit. Signed, stable,
   runs under launchd, holds the TCC grant.
 - `apple-bridge-mcp` — a hand-rolled stdio MCP server. No SDK, because SwiftPM
@@ -136,13 +136,22 @@ Three Swift targets in one package:
   title. Two accounts both ship a "Reminders" list; titles lie.
 - `flagged: false` is a no-op on create and update. `flagged: true` fails,
   and the error names the recovery, because agents hit it mid-call.
+- Every event read is windowed, and the result names the window it searched. An
+  empty page has to say the emptiness is about the window, not about the
+  calendar — otherwise "what's on my calendar this month" gets answered with a
+  silent week.
+- Never mint a second signing certificate with the same common name. It makes
+  `codesign --sign` ambiguous and can quietly change the designated requirement,
+  which invalidates the TCC grant.
 
 ## Status
 
-Working, tested (32 tests), and in daily use against real reminders. The design,
-its rationale, and the pinned decisions live in [PRD.md](PRD.md); the operational
-rules agents must follow are in [AGENTS.md](AGENTS.md); and the whole messy
-story, day by day, is in [ACTIONS.md](ACTIONS.md).
+Working, tested (52 tests), and in daily use against real reminders and
+calendars. Calendar reads landed in `b134484` and were finished in `7a8d065`;
+event writes are next. The design, its rationale, and the pinned decisions live
+in [PRD.md](PRD.md); the operational rules agents must follow are in
+[AGENTS.md](AGENTS.md); and the whole messy story, day by day, is in
+[ACTIONS.md](ACTIONS.md).
 
 Now go write some code that actually matters.
 

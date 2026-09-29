@@ -13,12 +13,17 @@ public enum BridgeCommand: String, Codable, CaseIterable {
     case delete
     case calendars
     case events
+    case eventCreate
+    case eventUpdate
+    case eventDelete
 }
 
 public struct BridgeRequest: Codable {
     public var command: BridgeCommand
     public var listId: String?
     public var reminderId: String?
+    /// `calendarItemIdentifier` of an event, for eventUpdate / eventDelete.
+    public var eventId: String?
     public var title: String?
     public var notes: String?
     /// ISO 8601 date or datetime, interpreted in the helper's local zone.
@@ -40,11 +45,20 @@ public struct BridgeRequest: Codable {
     /// Inclusive upper bound on event start. Absent means a bounded lookahead,
     /// not an unbounded fetch.
     public var startBefore: String?
+    /// Event start, on create and update. A date-only value creates an all-day event.
+    public var start: String?
+    /// Event end. Absent on create means the helper picks a sane duration.
+    public var end: String?
+    /// Force all-day on or off. Absent infers from whether `start` is date-only.
+    public var allDay: Bool?
+    public var location: String?
+    public var url: String?
 
     public init(
         command: BridgeCommand,
         listId: String? = nil,
         reminderId: String? = nil,
+        eventId: String? = nil,
         title: String? = nil,
         notes: String? = nil,
         due: String? = nil,
@@ -59,11 +73,17 @@ public struct BridgeRequest: Codable {
         clearDue: Bool? = nil,
         flagged: Bool? = nil,
         startAfter: String? = nil,
-        startBefore: String? = nil
+        startBefore: String? = nil,
+        start: String? = nil,
+        end: String? = nil,
+        allDay: Bool? = nil,
+        location: String? = nil,
+        url: String? = nil
     ) {
         self.command = command
         self.listId = listId
         self.reminderId = reminderId
+        self.eventId = eventId
         self.title = title
         self.notes = notes
         self.due = due
@@ -79,6 +99,11 @@ public struct BridgeRequest: Codable {
         self.flagged = flagged
         self.startAfter = startAfter
         self.startBefore = startBefore
+        self.start = start
+        self.end = end
+        self.allDay = allDay
+        self.location = location
+        self.url = url
     }
 }
 
@@ -185,9 +210,13 @@ public struct EventRecord: Codable, Equatable {
     public var allDay: Bool
     public var location: String
     public var url: String?
+    /// True when this event is part of a series. Recurring events can be read but
+    /// never written: EventKit has no "edit this occurrence only" API, so a write
+    /// would have to guess between the series and the occurrence.
+    public var recurring: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, title, notes, calendar, start, end, location, url
+        case id, title, notes, calendar, start, end, location, url, recurring
         case calendarId = "calendar_id"
         case allDay = "all_day"
     }
@@ -202,7 +231,8 @@ public struct EventRecord: Codable, Equatable {
         end: String?,
         allDay: Bool,
         location: String,
-        url: String?
+        url: String?,
+        recurring: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -214,6 +244,26 @@ public struct EventRecord: Codable, Equatable {
         self.allDay = allDay
         self.location = location
         self.url = url
+        self.recurring = recurring
+    }
+}
+
+public struct DeletedEvent: Codable, Equatable {
+    public var id: String
+    public var title: String
+    public var calendar: String
+    public var calendarId: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, calendar
+        case calendarId = "calendar_id"
+    }
+
+    public init(id: String, title: String, calendar: String, calendarId: String) {
+        self.id = id
+        self.title = title
+        self.calendar = calendar
+        self.calendarId = calendarId
     }
 }
 
