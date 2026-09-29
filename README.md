@@ -96,13 +96,16 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
 
 ### Thin stdio MCP service (the fast-moving piece)
 
-- A second executable target in the same Swift package, built on the official MCP
-  Swift SDK. Package layout: `Sources/AppleBridgeProtocol` (the shared wire types
-  as `Codable`s, plus the one `sockaddr_un` builder both sides use so a long home
-  directory cannot truncate the path), `Sources/apple-bridge-helper` (the only target
-  that links EventKit), `Sources/apple-bridge-mcp`. Keeping EventKit out of the
-  MCP target matters: linking it wouldn't raise a prompt by itself, but it puts
-  the privacy API in the binary that's supposed to stay clear of TCC.
+- A second executable target in the same Swift package, speaking MCP stdio
+  (line-delimited JSON-RPC) directly — no SDK, for the reason recorded in
+  AGENTS.md under "Environment blocker". Package layout:
+  `Sources/AppleBridgeProtocol` (shared wire types as `Codable`s, plus the pure
+  logic worth testing without EventKit: the single `sockaddr_un` builder so a long
+  home directory cannot truncate the path, `writeAll`, the Reminders rules, and
+  `Deadline`), `Sources/apple-bridge-helper` (the only target that links
+  EventKit), `Sources/apple-bridge-mcp`. Keeping EventKit out of the MCP target
+  matters: linking it wouldn't raise a prompt by itself, but it puts the privacy
+  API in the binary that's supposed to stay clear of TCC.
 - Needs no TCC grant and no stable signature — it never touches EventKit, only
   the socket — so it can be rebuilt and iterated freely. Only the stable helper
   carries the signing discipline. Note "no stable signature" ≠ "unsigned": Apple
