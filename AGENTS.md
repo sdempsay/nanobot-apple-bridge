@@ -1,6 +1,6 @@
 # AGENTS.md — apple-bridge
 
-Working notes for agents (and humans) in this repo. Read README.md first for the
+Working notes for agents (and humans) in this repo. Read PRD.md first for the
 architecture and its rationale; this file is the operational layer: what is
 verified, what is broken in the environment, and what not to rediscover the hard way.
 
@@ -9,7 +9,7 @@ docs. Rules that are still true go here; history goes there.
 
 ## What this repo is
 
-Two Swift executables plus a shared protocol library (see README):
+Two Swift executables plus a shared protocol library (see PRD.md):
 
 - `Sources/AppleBridgeProtocol` — wire types (Codable, JSONValue) plus the pure
   logic that is shared or worth testing without EventKit: the `sockaddr_un`
@@ -115,7 +115,7 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
 - A late callback after a timeout writes its captured box and nobody reads it.
   Harmless; do not add a mutex for it.
 
-## Wire-protocol rules (pinned in README, enforced in code)
+## Wire-protocol rules (pinned in PRD.md, enforced in code)
 
 - Lists are addressed by EventKit `calendarIdentifier` (`listId`). Never by
   title — iCloud and On My Mac both ship a list named "Reminders".
