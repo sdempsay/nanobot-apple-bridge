@@ -283,6 +283,23 @@ let toolDefinitions: JSONValue = .array([
         objectSchema([
             "id": field("string", "Reminder id from reminders_read or reminders_create."),
         ], required: ["id"])),
+    // PROTOTYPE: calendar read only.
+    tool(
+        "calendars",
+        "List the user's calendars. Each entry has id (an EventKit calendarIdentifier "
+            + "— use this to address a calendar), name, and isDefault. Takes no arguments.",
+        objectSchema([:])),
+    tool(
+        "events_read",
+        "Read events from the next 7 days. RULE: every field you send NARROWS the "
+            + "result — to read everything, omit it. Omitting calendar reads the "
+            + "default calendar; calendar: \"all\" reads every visible calendar. "
+            + "The window is fixed at 7 days from now; there is no date filter yet.",
+        objectSchema([
+            "calendar": field("string", "OPTIONAL — omit for the default calendar. "
+                + "Calendar name, calendar id, or \"all\" for every visible calendar."),
+            "limit": field("integer", "OPTIONAL — omit for 50. Page size from 1 to 100."),
+        ])),
 ])
 
 func tool(_ name: String, _ description: String, _ schema: JSONValue) -> JSONValue {
@@ -446,6 +463,18 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
                 command: .delete,
                 reminderId: try stringField(arguments, "id") ?? ""),
             retry: false)
+    // PROTOTYPE: calendar read only.
+    case "calendars":
+        try rejectUnknown(arguments, allowed: [])
+        return ToolCall(request: BridgeRequest(command: .calendars), retry: true)
+    case "events_read":
+        try rejectUnknown(arguments, allowed: ["calendar", "limit"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .events,
+                list: try optionalField(arguments, "calendar"),
+                limit: try limitField(arguments, "limit")),
+            retry: true)
     default:
         throw ArgFailure("unknown tool '\(name)'")
     }

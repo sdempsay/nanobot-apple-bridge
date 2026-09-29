@@ -89,7 +89,19 @@ store.requestFullAccessToReminders { granted, error in
                 + "Allow it in System Settings, then kickstart the LaunchAgent.")
         }
         log("Reminders access granted")
-        startServer(store: store)
+
+        // PROTOTYPE: calendar is a SECOND TCC grant, separate from Reminders.
+        // Requesting it is harmless if denied — the calendar tools then report the
+        // refusal instead of the whole helper refusing to start.
+        store.requestFullAccessToEvents { eventsGranted, eventsError in
+            if let eventsError {
+                log("calendar access request failed: \(eventsError.localizedDescription)")
+            }
+            log(eventsGranted
+                ? "Calendar access granted"
+                : "Calendar access NOT granted — calendar tools will refuse")
+            startServer(store: store)
+        }
     }
 }
 

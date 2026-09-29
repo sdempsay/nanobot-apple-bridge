@@ -11,6 +11,8 @@ public enum BridgeCommand: String, Codable, CaseIterable {
     case create
     case update
     case delete
+    case calendars
+    case events
 }
 
 public struct BridgeRequest: Codable {
@@ -147,3 +149,79 @@ public let bridgeSocketPath: String =
     FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/apple-bridge/helper.sock")
     .path
+
+// MARK: - Calendar (prototype)
+
+public struct CalendarInfo: Codable, Equatable {
+    public var id: String
+    public var name: String
+    public var isDefault: Bool
+
+    public init(id: String, name: String, isDefault: Bool) {
+        self.id = id
+        self.name = name
+        self.isDefault = isDefault
+    }
+}
+
+public struct EventRecord: Codable, Equatable {
+    public var id: String
+    public var title: String
+    public var notes: String
+    public var calendar: String
+    public var calendarId: String
+    public var start: String?
+    public var end: String?
+    public var allDay: Bool
+    public var location: String
+    public var url: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, notes, calendar, start, end, location, url
+        case calendarId = "calendar_id"
+        case allDay = "all_day"
+    }
+
+    public init(
+        id: String,
+        title: String,
+        notes: String,
+        calendar: String,
+        calendarId: String,
+        start: String?,
+        end: String?,
+        allDay: Bool,
+        location: String,
+        url: String?
+    ) {
+        self.id = id
+        self.title = title
+        self.notes = notes
+        self.calendar = calendar
+        self.calendarId = calendarId
+        self.start = start
+        self.end = end
+        self.allDay = allDay
+        self.location = location
+        self.url = url
+    }
+}
+
+public struct EventPage: Codable, Equatable {
+    public var events: [EventRecord]
+    public var matched: Int
+    public var truncated: Bool
+    public var scope: String?
+
+    public init(
+        events: [EventRecord],
+        matched: Int,
+        truncated: Bool,
+        scope: String? = nil
+    ) {
+        self.events = events
+        self.matched = matched
+        self.truncated = truncated
+        self.scope = scope
+    }
+}
