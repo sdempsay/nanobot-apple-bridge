@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.org.dempsay.apple-bridge.helper</string>
+
+    <!-- Program points directly at the installed binary. No wrapper script and no
+         `swift run` parent: launchd makes the process it starts responsible for
+         itself, and a wrapper would push the TCC blame back onto the wrapper. -->
+    <key>Program</key>
+    <string>__HOME__/Library/Application Support/apple-bridge/apple-bridge-helper</string>
+
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Application Support/apple-bridge/helper.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Application Support/apple-bridge/helper.log</string>
+</dict>
+</plist>

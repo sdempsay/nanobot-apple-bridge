@@ -40,7 +40,7 @@ Privilege separation, the macOS-native pattern (same idea as XPC, pragmatic vers
 agent (MCP client)
    │  stdio, MCP protocol
    ▼
-apple-bridge-mcp        ← thin Swift stdio MCP service (fast-moving, unsigned)
+apple-bridge-mcp        ← thin Swift stdio MCP service (fast-moving, ad-hoc signed)
    │  Unix domain socket, newline-delimited JSON
    ▼
 apple-bridge-helper     ← signed Swift per-user LaunchAgent (stable, privileged)
@@ -51,10 +51,19 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
 
 ### Signed Swift helper (the privileged piece)
 
-- Links EventKit, embeds an Info.plist (`-sectcreate __TEXT __info_plist`) with
-  `NSRemindersFullAccessUsageDescription`, calls `requestFullAccessToReminders()`.
-  (Linking the current SDK makes the older `requestAccess(to:)` path fail without
-  a prompt.)
+- Links EventKit — and it is the *only* target that does (see package layout
+  under the MCP section). Embeds an Info.plist (`-sectcreate __TEXT __info_plist`)
+  containing both usage strings from day one
+  (`NSRemindersFullAccessUsageDescription` and
+  `NSCalendarsFullAccessUsageDescription` — adding the calendar key now is
+  harmless and avoids a second signing surprise later) **plus a stable
+  `CFBundleIdentifier` and display name**. The usage string supplies the prompt
+  text, but the bundle ID is what makes the TCC client a stable identifier:
+  without it, the grant is often tied to the absolute path, so moving the binary
+  from a `swift build` directory to the LaunchAgent path looks like a new app and
+  the prompt comes back.
+- Calls `requestFullAccessToReminders()`. (Linking the current SDK makes the
+  older `requestAccess(to:)` path fail without a prompt.)
 - Signed with a stable identity (Developer ID, or a stable self-signed identity for
   local-only use). Ad-hoc signing pins the TCC grant to the cdhash, so every rebuild
   re-prompts; a stable identity is what lets the grant survive rebuilds.
@@ -67,13 +76,18 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
   mode the JXA bridge already has. Two ways to break the chain:
   1. **launchd starts the helper** — a launchd-started process is responsible for
      itself. This is the primary design (see Lifecycle).
-  2. The parent spawns it with `responsibility_spawnattrs_setdisclaim` — the
-     fallback for ad-hoc/dev use.
+  2. The parent spawns it with `responsibility_spawnattrs_setdisclaim` — private
+     SPI. Fine as a documented dev fallback, but no milestone may depend on it;
+     the LaunchAgent path is the one with a public mechanism.
 - Exposes a narrow, stable command set over the socket:
   `lists`, `reminders`, `create`, `update`, `delete` (+ calendar equivalents later).
   Narrow is a security requirement, not minimalism: same-user access is the *whole*
   boundary, so any local process can drive whatever the helper exposes once it's
   approved.
+- Lists are addressed by EventKit's `calendarIdentifier` on the wire; title is a
+  convenience lookup only. Title addressing fails when two lists share a name
+  (iCloud and On My Mac both ship a "Reminders" list). This is baked into the
+  shared wire types, so it's pinned here before any code exists.
 - Bonus unlock: as a long-lived process with a warm `EKEventStore`, it can subscribe
   to `EKEventStoreChangedNotification`. Note the notification is coarse — it means
   "something changed," and the helper must refetch — and it only exists while the
@@ -82,12 +96,19 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
 
 ### Thin stdio MCP service (the fast-moving piece)
 
-- A second Swift executable in this repo (`apple-bridge-mcp/`), built on the
-  official MCP Swift SDK. Same language and toolchain as the helper, and the two
-  share the socket's command/response types as Swift `Codable`s.
-- Needs no TCC grant and no stable signature — it never touches EventKit, only the
-  socket — so it can be rebuilt and iterated freely. Only the stable helper carries
-  the signing discipline.
+- A second executable target in the same Swift package, built on the official MCP
+  Swift SDK. Package layout: `Sources/AppleBridgeProtocol` (the shared wire types
+  as `Codable`s, plus the one `sockaddr_un` builder both sides use so a long home
+  directory cannot truncate the path), `Sources/apple-bridge-helper` (the only target
+  that links EventKit), `Sources/apple-bridge-mcp`. Keeping EventKit out of the
+  MCP target matters: linking it wouldn't raise a prompt by itself, but it puts
+  the privacy API in the binary that's supposed to stay clear of TCC.
+- Needs no TCC grant and no stable signature — it never touches EventKit, only
+  the socket — so it can be rebuilt and iterated freely. Only the stable helper
+  carries the signing discipline. Note "no stable signature" ≠ "unsigned": Apple
+  Silicon refuses to execute a fully unsigned binary, so this target is ad-hoc
+  signed on every build (fine — nothing in TCC attaches to it), while the helper
+  must never be (ad-hoc pins the grant to the cdhash; rebuild = re-prompt).
 - Relationship to mac-reminders: none in code. mac-reminders (Python + JXA) stays
   untouched as the reference implementation until apple-bridge reaches parity, then
   is superseded.
@@ -99,20 +120,31 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
   mode 0600. Same-user UID is the trust boundary.
 - Not TCP: no port squatting, no firewall prompts, no network exposure.
 - Framing: newline-delimited JSON, e.g.
-  `{"command":"create","list":"Work","title":"..."}` → one JSON response line.
-- **Single-instance rule:** two clients that fail to connect must not race to start
-  two helpers. Either the LaunchAgent is the only thing that starts it (preferred),
-  or bind is serialized with a lock.
+  `{"command":"create","listId":"<calendarIdentifier>","title":"..."}` →
+  one JSON response line. (`listId` is the EventKit `calendarIdentifier` — see
+  the helper section for why lists are never addressed by title on the wire.)
+- **Single-instance rule:** two clients that fail to connect must not race to
+  start two helpers. The LaunchAgent is the only thing that starts it; the dev
+  fallback (disclaimed spawn) serializes bind with a lock.
 
 ### Lifecycle
 
-- **A per-user LaunchAgent is the primary design**, running in the graphical session
-  so the TCC prompt can actually present. A system daemon has no UI session to show
-  the dialog, and in some launchd contexts `requestFullAccessToReminders()` waits
-  forever instead of returning denied.
-- On-demand spawn from the MCP layer is the fallback only, and only if the spawn
-  disclaims responsibility via `responsibility_spawnattrs_setdisclaim` — otherwise
-  the grant attributes to whatever host launched the MCP server.
+- **A per-user LaunchAgent is the primary design**, running in the graphical
+  session (`LimitLoadToSessionType = Aqua`) so the TCC prompt can actually
+  present. A system daemon has no UI session to show the dialog, and in some
+  launchd contexts `requestFullAccessToReminders()` waits forever instead of
+  returning denied.
+- **The helper binary must be the LaunchAgent's own program.** launchd makes the
+  process it starts responsible for itself, and that process is then responsible
+  for any child *it* starts — so a wrapper script or a `swift run` parent puts
+  the TCC blame back on the wrapper. The plist's `Program` points directly at a
+  stable installed path,
+  `~/Library/Application Support/apple-bridge/apple-bridge-helper`.
+- On startup the helper unlinks a stale `helper.sock` before binding; otherwise a
+  `KeepAlive` plist crash-loops on the leftover socket.
+- On-demand spawn from the MCP layer is the dev fallback only, via
+  `responsibility_spawnattrs_setdisclaim` (private SPI — no milestone depends on
+  it). Otherwise the grant attributes to whatever host launched the MCP server.
 
 ## Scope
 
@@ -146,16 +178,19 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
 
 ## Status
 
-Design captured 2026-09-28 and revised after external design review (TCC
-responsible-process correction, `remindd` naming, second-grant Calendar, socket
-hardening, EventKit ceiling) and a decision to write both components in Swift.
-No code yet. Natural first steps:
+Design captured 2026-09-28 and revised across two rounds of external design
+review (TCC responsible-process correction, `remindd` naming, second-grant
+Calendar, socket hardening, EventKit ceiling; then Apple Silicon signing
+requirements, Info.plist identity, LaunchAgent program/Aqua-session specifics,
+private-SPI fallback scoping, and `calendarIdentifier` wire addressing) plus a
+decision to write both components in Swift. No code yet. Natural first steps:
 
-1. Scaffold one Swift package with two executable targets: `apple-bridge-helper`
-   (EventKit auth flow, socket server, `lists` command) and `apple-bridge-mcp`
-   (MCP Swift SDK, socket client, one tool) — sharing Codable wire types.
+1. Scaffold one Swift package with the three targets above (protocol library +
+   two executables). Helper first: EventKit auth flow, socket server, `lists`
+   command. Wire types use `calendarIdentifier` from the start.
 2. Add the per-user LaunchAgent plist; the helper runs under launchd from day one,
    not as an afterthought.
 3. Port the remaining commands (`reminders`, `create`, `update`, `delete`) to
    parity with mac-reminders.
-4. Calendar support (second usage string + grant flow).
+4. Calendar support (the grant flow and the calendar commands — the usage string
+   already ships in the first plist).

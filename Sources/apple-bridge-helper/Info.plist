@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.dempsay.apple-bridge.helper</string>
+    <key>CFBundleName</key>
+    <string>apple-bridge-helper</string>
+    <key>CFBundleExecutable</key>
+    <string>apple-bridge-helper</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>apple-bridge reads and writes Reminders on behalf of connected agents.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>apple-bridge reads and writes Calendar events on behalf of connected agents. Calendar commands ship in a later milestone.</string>
+</dict>
+</plist>
