@@ -29,6 +29,14 @@ public enum ReminderText {
     public static let eventWindowTooWide =
         "The event window is wider than \(maxEventWindowDays) days. Read a shorter range — "
         + "start_after and start_before can each be omitted, and the window never starts in the past."
+    public static let recurringRefused =
+        "\"\(recurringSubject)\" is a recurring event, and recurring events are read-only. "
+        + "apple-bridge will not guess whether you meant this occurrence or the whole series, "
+        + "because getting that wrong edits every future event. Change it in Calendar."
+    public static let recurrenceUnsupported =
+        "Recurrence is not supported — apple-bridge will not create a repeating event, because it "
+        + "cannot read one back correctly. Create a single event instead."
+    public static let recurringSubject = "That event"
 }
 
 /// A local calendar minute. All-day values use 00:00 as the sort point.
@@ -580,6 +588,70 @@ private func eventPageNote(
         parts.append("the page was capped; more events match inside \(window.display)")
     }
     return parts.isEmpty ? nil : parts.joined(separator: "; ")
+}
+
+// MARK: - Event write rules
+
+/// Default length for a timed event created without an end.
+public let defaultEventMinutes = 60
+
+/// The start/end/all-day triple a create or update should apply, with EventKit's
+/// own conventions filled in. A date-only `start` means an all-day event, and an
+/// all-day event runs to midnight at the start of the next day — EventKit's
+/// exclusive end. `end` is ignored for an all-day event, because a caller passing
+/// "2026-10-01" for both bounds means one day, not zero.
+public func eventTimes(
+    start: String?,
+    end: String?,
+    allDay: Bool?,
+    required: Bool,
+    zone: TimeZone = .current,
+    now: Date = Date()
+) throws -> (start: Date, end: Date, allDay: Bool)? {
+    guard let start else {
+        if required {
+            throw ReminderFailure("An event needs a start — pass start as YYYY-MM-DD or YYYY-MM-DDTHH:MM.")
+        }
+        return nil
+    }
+    let startAt = try parseDue(start, zone: zone)
+    let isAllDay = allDay ?? startAt.allDay
+    let startDate = date(for: startAt.span().start, zone: zone) ?? now
+    if isAllDay {
+        // Add a real day, not day+1: 2026-10-31 + 1 is not the 32nd of anything.
+        let nextDay = gregorian(zone).date(byAdding: .day, value: 1, to: startDate)
+        return (startDate, nextDay ?? startDate.addingTimeInterval(86400), true)
+    }
+    guard let end, !end.isEmpty else {
+        return (startDate, startDate.addingTimeInterval(Double(defaultEventMinutes) * 60), false)
+    }
+    let endAt = try parseDue(end, zone: zone)
+    let endDate = date(for: endAt.point(), zone: zone) ?? startDate
+    guard endDate > startDate else {
+        throw ReminderFailure("An event's end must be after its start — end \(end) is not after start \(start).")
+    }
+    return (startDate, endDate, false)
+}
+
+/// Recurring events are read-only, by decision rather than by limitation of
+/// effort. EventKit has no "edit this occurrence only" API, so a write to an
+/// expanded occurrence would have to choose between the series and the single
+/// event, and the wrong choice silently rewrites every future occurrence.
+/// This lives here, not in the tool description, because a model that skipped
+/// reading the description still has to be stopped.
+public func rejectRecurring(_ recurring: Bool, title: String, id: String) throws {
+    guard recurring else { return }
+    throw ReminderFailure(
+        "Event \"\(title)\" (\(id)) recurs, and recurring events are read-only: "
+        + "apple-bridge will not guess whether you meant this occurrence or the whole series, "
+        + "because the wrong choice edits every future event. Change it in Calendar.")
+}
+
+/// Reject an update that would change nothing, mirroring the reminder rule.
+public func validateEventUpdate(changing: Bool) throws {
+    guard changing else {
+        throw ReminderFailure("Update needs at least one field to change.")
+    }
 }
 
 private func matches(

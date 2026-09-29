@@ -204,12 +204,17 @@ let serverInstructions =
     + "Use the reminder id from a read or create result for reminders_update and "
     + "reminders_delete. Do not invent ids. Delete removes the reminder from its list. "
     + "The flag cannot be read or changed. "
-    + "Calendar events are read only — there is no create, update, or delete for them, and "
-    + "an event id is only good for identifying that event in a later read. Event records "
-    + "carry location and url; reminders do not. "
+    + "Calendar events can be created, edited, and deleted with events_create, events_update, "
+    + "and events_delete — but RECURRING EVENTS ARE READ-ONLY. If an event's recurring field is "
+    + "true, every write to it fails and changes nothing, because apple-bridge will not guess "
+    + "between editing one occurrence and editing the whole series. Recurrence cannot be created "
+    + "at all. Check recurring before any write. "
+    + "Use the event id from a read or create result for events_update and events_delete. "
+    + "Do not invent ids. A full iCloud re-sync discards event ids, so re-read if one goes stale. "
+    + "Event records carry location and url; reminders do not. "
     + "Every event read is windowed by start time: if you send no start_after or "
     + "start_before you get the next 7 days, and the result's window field says so. "
-    + "Recurrence, alarms, tags, and subtasks are unavailable."
+    + "Alarms, tags, and subtasks are unavailable."
 
 let toolDefinitions: JSONValue = .array([
     tool(
@@ -315,8 +320,7 @@ let toolDefinitions: JSONValue = .array([
             + "\"nothing starts in that window\", not \"your calendar is empty\". "
             + "start_after never reaches into the past: it means \"from this time on\". "
             + "A window wider than 62 days is refused rather than trimmed, so read a shorter "
-            + "range. Events are read only; there is no create, update, or delete. "
-            + "Recurring events appear once per occurrence.",
+            + "range. Recurring events appear once per occurrence and cannot be written.",
         objectSchema([
             "calendar": field("string", "OPTIONAL — omit for the default calendar only. "
                 + "Calendar name, calendar id, or \"all\" for every visible calendar."),
@@ -328,6 +332,56 @@ let toolDefinitions: JSONValue = .array([
                 + "whole local day."),
             "limit": field("integer", "OPTIONAL — omit for 50. Page size from 1 to 100."),
         ])),
+    tool(
+        "events_create",
+        "Create one event. start is required; title is required. "
+            + "Recurring events are NOT supported — the call fails if you ask for one, because "
+            + "apple-bridge cannot read a series back correctly. "
+            + "Defaults to the default calendar; name one explicitly rather than sending \"all\", "
+            + "which is a read scope and is refused here. Returns the new record, including the "
+            + "id to pass to events_update and events_delete.",
+        objectSchema([
+            "title": field("string", "Event title."),
+            "start": field("string", "REQUIRED. YYYY-MM-DD for an all-day event, or "
+                + "YYYY-MM-DDTHH:MM for a timed one. A date-only value creates an all-day event."),
+            "end": field("string", "OPTIONAL — omit for a 1-hour event. YYYY-MM-DDTHH:MM for a "
+                + "timed event. Ignored for an all-day event, which always runs one day."),
+            "all_day": field("boolean", "OPTIONAL — omit to infer from start. Force an event "
+                + "all-day or timed."),
+            "calendar": field("string", "OPTIONAL — omit for the default calendar. Calendar "
+                + "name or calendar id. \"all\" is refused."),
+            "notes": field("string", "OPTIONAL — omit for an empty note."),
+            "location": field("string", "OPTIONAL — omit for no location."),
+            "url": field("string", "OPTIONAL — omit. An http(s) URL attached to the event."),
+        ], required: ["title", "start"])),
+    tool(
+        "events_update",
+        "Patch one event by id. Omitted fields stay as they are. "
+            + "RECURRING EVENTS ARE REFUSED — if the event recurs, the call fails and changes "
+            + "nothing, because editing a series by accident rewrites every future occurrence. "
+            + "Check the recurring field on the record first. "
+            + "Passing an empty string to notes or location clears it. "
+            + "Returns the updated record.",
+        objectSchema([
+            "id": field("string", "Event id from events_read, events_upcoming, or events_create."),
+            "title": field("string", "Replacement title."),
+            "notes": field("string", "Replacement notes. An empty string clears them."),
+            "location": field("string", "Replacement location. An empty string clears it."),
+            "start": field("string", "Replacement start. YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+            "end": field("string", "Replacement end. Omitting it alongside start keeps the "
+                + "current duration."),
+            "all_day": field("boolean", "Force the event all-day or timed."),
+            "calendar": field("string", "Move the event to this calendar name or id."),
+        ], required: ["id"])),
+    tool(
+        "events_delete",
+        "Remove one event from its calendar. "
+            + "RECURRING EVENTS ARE REFUSED — if the event recurs, the call fails and nothing is "
+            + "deleted, because deleting one occurrence of a series is ambiguous. "
+            + "Check the recurring field on the record first.",
+        objectSchema([
+            "id": field("string", "Event id from events_read, events_upcoming, or events_create."),
+        ], required: ["id"])),
 ])
 
 func tool(_ name: String, _ description: String, _ schema: JSONValue) -> JSONValue {
@@ -514,13 +568,66 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
                 startAfter: try optionalField(arguments, "start_after"),
                 startBefore: try optionalField(arguments, "start_before")),
             retry: true)
+    case "events_create":
+        try rejectRecurrenceArgument(arguments)
+        try rejectUnknown(
+            arguments,
+            allowed: ["title", "start", "end", "all_day", "calendar", "notes", "location", "url"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .eventCreate,
+                title: try stringField(arguments, "title") ?? "",
+                notes: try optionalField(arguments, "notes"),
+                list: try optionalField(arguments, "calendar"),
+                start: try optionalField(arguments, "start"),
+                end: try optionalField(arguments, "end"),
+                allDay: try boolField(arguments, "all_day"),
+                location: try optionalField(arguments, "location"),
+                url: try optionalField(arguments, "url")),
+            retry: false)
+    case "events_update":
+        try rejectRecurrenceArgument(arguments)
+        try rejectUnknown(
+            arguments,
+            allowed: ["id", "title", "notes", "location", "start", "end", "all_day", "calendar"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .eventUpdate,
+                eventId: try stringField(arguments, "id") ?? "",
+                title: try stringField(arguments, "title"),
+                notes: try stringField(arguments, "notes"),
+                list: try optionalField(arguments, "calendar"),
+                start: try optionalField(arguments, "start"),
+                end: try optionalField(arguments, "end"),
+                allDay: try boolField(arguments, "all_day"),
+                location: try stringField(arguments, "location")),
+            retry: false)
+    case "events_delete":
+        try rejectRecurrenceArgument(arguments)
+        try rejectUnknown(arguments, allowed: ["id"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .eventDelete,
+                eventId: try stringField(arguments, "id") ?? ""),
+            retry: false)
     default:
         throw ArgFailure("unknown tool '\(name)'")
     }
 }
 
-func argumentObject(_ params: [String: JSONValue]?) throws -> [String: JSONValue] {
-    guard let raw = params?["arguments"] else { return [:] }
+/// A caller that wants a repeating event will reach for one of these names. We do
+/// not support recurrence, and `rejectUnknown` would answer with a bare
+/// "Unknown argument", which reads like a typo and invites a retry with a
+/// different spelling. Say what is actually wrong instead.
+private let recurrenceArguments = ["recurrence", "repeat", "rrule", "recurring", "every", "frequency"]
+
+func rejectRecurrenceArgument(_ args: [String: JSONValue]) throws {
+    if let key = args.keys.first(where: { recurrenceArguments.contains($0.lowercased()) }) {
+        throw ArgFailure(ReminderText.recurrenceUnsupported + " (rejected '\(key)')")
+    }
+}
+
+func argumentObject(_ params: [String: JSONValue]?) throws -> [String: JSONValue] {    guard let raw = params?["arguments"] else { return [:] }
     if case .null = raw { return [:] }
     guard case .object(let object) = raw else {
         throw ArgFailure("arguments must be an object.")

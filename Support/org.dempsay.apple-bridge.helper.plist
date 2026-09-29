@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.org.dempsay.apple-bridge.helper</string>
+    <string>org.dempsay.apple-bridge.helper</string>
 
     <!-- Program points directly at the installed binary. No wrapper script and no
          `swift run` parent: launchd makes the process it starts responsible for

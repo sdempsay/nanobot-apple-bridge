@@ -25,15 +25,15 @@ Two Swift executables plus a shared protocol library (see PRD.md):
 ```sh
 swift build                                   # clean build, no warnings expected
 bash Support/install.sh                       # build, install to ~/.local/bin, sign, bootstrap LaunchAgent
-launchctl print gui/$(id -u)/com.org.dempsay.apple-bridge.helper | grep -E "state|pid"
+launchctl print gui/$(id -u)/org.dempsay.apple-bridge.helper | grep -E "state|pid"
 cat ~/Library/Application\ Support/apple-bridge/helper.log
 ```
 
 Remove the agent:
 
 ```sh
-launchctl bootout gui/$(id -u)/com.org.dempsay.apple-bridge.helper
-rm ~/Library/LaunchAgents/com.org.dempsay.apple-bridge.helper.plist
+launchctl bootout gui/$(id -u)/org.dempsay.apple-bridge.helper
+rm ~/Library/LaunchAgents/org.dempsay.apple-bridge.helper.plist
 ```
 
 MCP handshake smoke test (no helper required; expects initialize + tools/list):
@@ -184,8 +184,73 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
 - [x] 2026-09-29: the MCP→helper response read is bounded by a per-request
       `Deadline` via `readFrame` (25s helper / 30s client). Tests: `FrameReadTests` (5)
       — silent peer, partial frame then silence, closed peer, spent budget, and that a
-      frame boundary does not eat the next one. 27 tests total.
-- [ ] Milestone 3: Calendar commands (second grant flow)
+      frame boundary does not eat the next one. 27 tests (superseded by 52 at
+      Milestone 3a).
+- [x] 2026-09-29: Milestone 3a — Calendar read. `calendars`, `events_read` (with
+      `start_after` / `start_before`), and `events_upcoming` (zero arguments). Second
+      TCC grant required one human click, same as Reminders. `EventRecord.id` uses
+      `calendarItemIdentifier`, not `eventIdentifier` — Apple documents the latter as
+      changing when an event moves calendars or re-syncs. `EventPage` reports `window`,
+      `filters`, and `note`. 52 tests.
+- [x] 2026-09-29: Milestone 3b — Calendar write. `events_create` / `events_update` /
+      `events_delete`, all refusing recurring events. The refusal is helper-side, not just
+      in the tool description. `EKEvent` has no `isRecurring` — it is `recurrenceRules` on
+      the superclass, and a non-nil *empty* array is NOT recurring; getting that wrong in
+      the permissive direction would refuse ordinary events. Events save/remove via the
+      span API (`save(_:span:commit:)` / `remove(_:span:commit:)`), not the generic
+      `EKCalendarItem` one the reminder path uses. 66 tests. Verified live: create →
+      read back → update → delete, plus 43 occurrences of 3 real series refused on both
+      update and delete with the series still intact afterward.
+- [x] 2026-09-29: the `org.dempsay` LaunchAgent rename is done. `install.sh` retires
+      `com.org.dempsay.…` on every run. **Both grants survived it with no prompt**, and
+      they also survived the Calendar usage-string text change — see below.
+
+**Changing the usage string or the LaunchAgent label does not re-prompt.** Verified
+live, not reasoned: with the usage string changed to mention creating/editing/deleting
+events and the agent relabelled `com.org.dempsay` → `org.dempsay`, both Reminders and
+Calendar came back `granted` immediately. Neither is part of the designated
+requirement, which is `identifier "org.dempsay.apple-bridge.helper" and certificate
+root = H"3c6196…"` — built from the embedded Info.plist's `CFBundleIdentifier` (never
+change that) and the signing cert. A re-prompt after either change means something else
+is wrong; do not go looking for the string or the label.
+
+**`CSSMERR_TP_NOT_TRUSTED` on `find-identity` is a red herring.** It is reported even
+when the keychain is unlocked and `codesign` succeeds, so it is NOT a health check for
+this self-signed identity — do not read it as "the grant is about to break" or as
+evidence that the keychain is locked. Test signing instead: copy a binary and run
+`codesign --force --sign "apple-bridge Dev Signing" /tmp/probe`. An unlocked keychain
+yields exit 0 and a requirement anchored to `3c6196…`; a locked one fails with
+`errSecInternalComponent`. `install.sh`'s guard correctly tests
+`security show-keychain-info` instead, which is why it never misreads this.
+
+**All-day `endDate` is normalized to the last minute of the day.** EventKit stores
+`2026-10-09T23:59` regardless of whether we set an exclusive next-midnight or not, and
+iCloud-sourced all-day events read back the same way — so create and read agree and
+row 13's display concern does not reproduce. Verified against a self-created event and
+against two real all-day events in the Family calendar. Do not "fix" the writer to emit
+next-midnight on the strength of EventKit's documented convention; the observed
+behaviour is authoritative and the round trip is what matters.
+
+**Calendar grant flow — `tccutil` cannot do this.** It addresses
+LaunchServices-registered bundles; the helper is a bare executable whose plist is
+embedded via `-sectcreate __TEXT __info_plist`, which is not one. Both
+`org.dempsay.…` and `com.org.dempsay.…` return `No such bundle identifier
+(OSStatus error -10814)`. The real flow is `bash Support/install.sh` then click
+Allow on the prompt. `Support/grant-calendar-permission.sh` was written on the
+wrong assumption and removed in 283cd4e — do not recreate it.
+
+**Locked keychain is a real failure mode.** If the login keychain is locked,
+`codesign` fails with `errSecInternalComponent` and
+`security show-keychain-info` returns `User interaction is not allowed`.
+`install.sh` now checks for this up front and refuses
+before touching the running agent, because the failure it used to cause was
+silent: the freshly-linked ad-hoc binary got copied into place, collapsing the
+designated requirement to the cdhash and invalidating the TCC grant. Unlock with
+`security unlock-keychain ~/Library/Keychains/login.keychain-db` and re-run.
+
+**Naming.** Every identifier this repo owns starts `org.dempsay`. The
+LaunchAgent label was `com.org.dempsay.…` until 741cce2; `install.sh` now retires
+that label on every run so a leftover agent cannot compete for the socket.
 
 Verified end-to-end sample (2026-09-28): `tools/call lists` returned the user's
 four lists (Reminders [default], Family, Work, For Shawn) with calendarIdentifiers.

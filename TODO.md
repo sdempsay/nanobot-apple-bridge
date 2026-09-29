@@ -20,10 +20,10 @@ See AGENTS.md for the full workflow.
 | 10 | `EventRecord.id` uses unstable `eventIdentifier`; use `calendarItemIdentifier` | complete | #5 (`6b2426c`) |
 | 11 | Give `events_read` a real date window and report it in the result | complete | #6 (`6b2426c`) |
 | 12 | Port the self-explaining read contract (`filters`/`note`, `events_upcoming`, `serverInstructions`) | complete | #7 (`6b2426c`) |
-| 13 | Decide recurrence, all-day `end`, and `notes` volume | pending | #8 (recurrence narrowed by #11) |
-| 14 | Test the calendar read path (none today) | pending | #9 (20 rules tests added; EventKit paths still bare) |
-| 15 | Sync docs with what actually shipped; rename LaunchAgent to `org.dempsay` | pending | #10 |
-| 16 | Add `events_create`/`update`/`delete`, refusing recurring events | pending | #11 |
+| 13 | Decide recurrence, all-day `end`, and `notes` volume | mostly decided; #8 stays open for the read-side record | #8 (recurrence narrowed by #11) |
+| 14 | Test the calendar read path (none today) | partial | #9 (34 rules tests; EventKit paths still bare) |
+| 15 | Sync docs with what actually shipped; rename LaunchAgent to `org.dempsay` | done | #10 |
+| 16 | Add `events_create`/`update`/`delete`, refusing recurring events | done | #11 |
 
 Calendar read shipped in `b134484` as a sizing prototype; rows 10–12 finished it
 in `6b2426c`, merged as #12 / `7a8d065`. 52 tests. Row 16 is the write surface,

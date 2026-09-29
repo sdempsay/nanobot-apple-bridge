@@ -1,6 +1,10 @@
 #!/bin/bash
 # Build, install, and (re)load the apple-bridge helper LaunchAgent.
 #
+# Naming: every identifier this repo owns starts `org.dempsay`. The label was
+# `com.org.dempsay.…` once; LEGACY_LABEL below retires it, because a leftover
+# agent under the old label would compete for the same socket.
+#
 # Signing: prefers the stable "apple-bridge Dev Signing" identity (self-signed,
 # trusted for code signing in the user domain). With it, TCC's designated
 # requirement is `identifier ... and certificate root ...`, so rebuilds do NOT
@@ -10,7 +14,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-LABEL=com.org.dempsay.apple-bridge.helper
+LABEL=org.dempsay.apple-bridge.helper
+LEGACY_LABEL=com.org.dempsay.apple-bridge.helper
 BASE="$HOME/Library/Application Support/apple-bridge"
 BINDIR="$HOME/.local/bin"
 HELPER="$BINDIR/apple-bridge-helper"
@@ -71,6 +76,14 @@ echo "==> installing binaries to $BINDIR"
 # Only now that the signature is known good: stop the running agent and swap in
 # the signed binary.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# Retire the old com.org label. Leaving it loaded would run a second helper
+# against the same socket; it would exit 0 on the single-instance probe, but two
+# agents registered for one helper is a confusing thing to debug later.
+if launchctl print "gui/$(id -u)/$LEGACY_LABEL" >/dev/null 2>&1; then
+    echo "==> retiring legacy agent $LEGACY_LABEL"
+    launchctl bootout "gui/$(id -u)/$LEGACY_LABEL" 2>/dev/null || true
+fi
+rm -f "$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 rm -f "$BASE/helper.sock" "$BASE/apple-bridge-helper"
 mv "$STAGED" "$HELPER"
 cp "$MCP_BIN" "$MCP"
