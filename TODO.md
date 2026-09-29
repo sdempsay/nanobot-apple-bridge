@@ -20,19 +20,33 @@ See AGENTS.md for the full workflow.
 | 10 | `EventRecord.id` uses unstable `eventIdentifier`; use `calendarItemIdentifier` | complete | #5 (`6b2426c`) |
 | 11 | Give `events_read` a real date window and report it in the result | complete | #6 (`6b2426c`) |
 | 12 | Port the self-explaining read contract (`filters`/`note`, `events_upcoming`, `serverInstructions`) | complete | #7 (`6b2426c`) |
-| 13 | Decide recurrence, all-day `end`, and `notes` volume | mostly decided; #8 stays open for the read-side record | #8 (recurrence narrowed by #11) |
+| 13 | Decide recurrence, all-day `end`, and `notes` volume | recurrence and all-day `end` settled; `notes` volume still open | #8 (recurrence narrowed by #11) |
 | 14 | Test the calendar read path (none today) | partial | #9 (34 rules tests; EventKit paths still bare) |
-| 15 | Sync docs with what actually shipped; rename LaunchAgent to `org.dempsay` | done | #10 |
-| 16 | Add `events_create`/`update`/`delete`, refusing recurring events | done | #11 |
+| 15 | Sync docs with what actually shipped; rename LaunchAgent to `org.dempsay` | complete | #10 (`2cbabd1`) |
+| 16 | Add `events_create`/`update`/`delete`, refusing recurring events | complete | #11 (`2cbabd1`) |
 
 Calendar read shipped in `b134484` as a sizing prototype; rows 10–12 finished it
-in `6b2426c`, merged as #12 / `7a8d065`. 52 tests. Row 16 is the write surface,
-unblocked now that row 10 has landed. Row 15 is next: the Calendar usage string
-now claims "reads and writes" while only reading ships, and the LaunchAgent
-still says `com.org.dempsay` where the house rule is `org.dempsay`.
+in `6b2426c`, merged as #12 / `7a8d065`. Rows 15 and 16 are the write surface
+and the naming sweep, merged as #13 / `b146df6`. 66 tests, up from 52.
 
-**Recurrence decision, partial (row 13 / #8):** reads report occurrences, as the
-prototype already did. Writes are out of scope for recurring events entirely —
-refuse rather than guess between series and single-occurrence semantics. That
-demotes recurrence from a write blocker to read-side documentation, and leaves
-all-day `end` and `notes` volume still open in #8.
+**Recurrence decision, settled (row 13 / #8, narrowed by #11):** reads report
+occurrences, as the prototype already did. Writes are out of scope for recurring
+events entirely — refuse rather than guess between series and single-occurrence
+semantics. Shipped helper-side in `2cbabd1`, and it covers an event that is one
+occurrence of a series too, not just the master: `.thisEvent` on a master
+silently diverges from Calendar.app and the user cannot see the difference.
+
+**All-day `end` resolved by observation, not by decision.** The writer sets an
+exclusive next-midnight; EventKit stores `23:59` on the same day, and events
+sourced from iCloud read back the same way, so create and read agree. Checked
+against a self-created event and two real all-day events. The writer is left
+alone deliberately — "correcting" it to match EventKit's documented convention
+is what would have broken the round trip.
+
+**`notes` volume is the one part of row 13 still genuinely undecided** — whether
+`EventRecord.notes` should be truncated, and at what length. Nothing ships
+truncating today.
+
+**Row 14 remains the real gap.** The 34 event tests are all pure protocol logic;
+`makeEventRecord`'s field mapping and the `Work` / `Work Calendar` name
+ambiguity still have no coverage, because they need EventKit.
