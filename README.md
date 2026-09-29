@@ -143,14 +143,21 @@ Three Swift targets in one package:
 - Never mint a second signing certificate with the same common name. It makes
   `codesign --sign` ambiguous and can quietly change the designated requirement,
   which invalidates the TCC grant.
+- Recurring events are readable and unwritable. The refusal lives in the helper,
+  not just the tool description, and it explains that it will not guess between
+  this occurrence and the whole series — so a model that retries after a bare
+  "not allowed" stops instead of trying another field. Recurrence cannot be
+  created at all, and an attempt to ask for it says so rather than reporting
+  "Unknown argument".
 
 ## Status
 
-Working, tested (52 tests), and in daily use against real reminders and
+Working, tested (66 tests), and in daily use against real reminders and
 calendars. Calendar reads landed in `b134484` and were finished in `7a8d065`;
-event writes are next. The design, its rationale, and the pinned decisions live
-in [PRD.md](PRD.md); the operational rules agents must follow are in
-[AGENTS.md](AGENTS.md); and the whole messy story, day by day, is in
+event writes (`events_create`, `events_update`, `events_delete`) are working
+and verified live in `2cbabd1`. The design, its rationale, and the pinned
+decisions live in [PRD.md](PRD.md); the operational rules agents must follow are
+in [AGENTS.md](AGENTS.md); and the whole messy story, day by day, is in
 [ACTIONS.md](ACTIONS.md).
 
 Now go write some code that actually matters.
