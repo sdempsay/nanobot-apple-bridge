@@ -138,8 +138,10 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
   process it starts responsible for itself, and that process is then responsible
   for any child *it* starts — so a wrapper script or a `swift run` parent puts
   the TCC blame back on the wrapper. The plist's `Program` points directly at a
-  stable installed path,
-  `~/Library/Application Support/apple-bridge/apple-bridge-helper`.
+  stable installed path, `~/.local/bin/apple-bridge-helper`. `install.sh` writes
+  that path with `$HOME` already expanded, because launchd does not expand `~`.
+  `apple-bridge-mcp` is installed beside it. The socket and log stay under
+  `~/Library/Application Support/apple-bridge/`.
 - On startup the helper unlinks a stale `helper.sock` before binding; otherwise a
   `KeepAlive` plist crash-loops on the leftover socket.
 - On-demand spawn from the MCP layer is the dev fallback only, via

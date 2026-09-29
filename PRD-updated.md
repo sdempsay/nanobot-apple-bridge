@@ -12,6 +12,11 @@ Learned while fixing the milestone-1 socket failure paths (2026-09-28).
 
 - Both sides build the Unix address through one helper. A path that does not leave room for a trailing NUL in `sun_path` (104 bytes on Darwin) is rejected before `bind` or `connect`. The length passed to the kernel is never larger than `sockaddr_un`.
 
+## Install location
+
+- The helper and the MCP executable are installed to `~/.local/bin`. The LaunchAgent `Program` is the absolute path of `apple-bridge-helper` there.
+- The socket and the helper log stay in `~/Library/Application Support/apple-bridge/`.
+
 ## MCP client
 
 - After the helper restarts, the next call closes the dead socket, connects again, and retries that call once.

@@ -19,7 +19,7 @@ Two Swift executables plus a shared protocol library (see README):
 
 ```sh
 swift build                                   # clean build, no warnings expected
-bash Support/install.sh                       # build, install, ad-hoc sign, bootstrap LaunchAgent
+bash Support/install.sh                       # build, install to ~/.local/bin, sign, bootstrap LaunchAgent
 launchctl print gui/$(id -u)/com.org.dempsay.apple-bridge.helper | grep -E "state|pid"
 cat ~/Library/Application\ Support/apple-bridge/helper.log
 ```
