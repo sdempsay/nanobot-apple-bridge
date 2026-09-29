@@ -17,6 +17,8 @@ func dispatchReminder(_ request: BridgeRequest, store: EKEventStore) -> BridgeRe
         return respond { try updateReminder(request, store: store, deadline: deadline) }
     case .delete:
         return respond { try deleteReminder(request, store: store, deadline: deadline) }
+    case .calendars, .events:
+        return dispatchCalendar(request, store: store)
     }
 }
 
@@ -276,7 +278,7 @@ private func applyDue(_ reminder: EKReminder, _ due: DueInstant) {
     reminder.dueDateComponents = components
 }
 
-private func formatTimestamp(_ date: Date) -> String {
+func formatTimestamp(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.calendar = Calendar(identifier: .gregorian)
     formatter.timeZone = TimeZone.current
@@ -301,7 +303,7 @@ private func remove(_ store: EKEventStore, _ reminder: EKReminder) throws {
     }
 }
 
-private func onMain<T>(
+func onMain<T>(
     _ deadline: Deadline, hop: String, _ work: @escaping () throws -> T
 ) throws -> T {
     precondition(!Thread.isMainThread, "must not block the main queue")
@@ -319,7 +321,7 @@ private func onMain<T>(
     return try value.get()
 }
 
-private func respond<T: Encodable>(_ body: () throws -> T) -> BridgeResponse {
+func respond<T: Encodable>(_ body: () throws -> T) -> BridgeResponse {
     do {
         guard let result = jsonValue(from: try body()) else {
             return BridgeResponse(ok: false, error: "Reminders failed: could not encode the result")
