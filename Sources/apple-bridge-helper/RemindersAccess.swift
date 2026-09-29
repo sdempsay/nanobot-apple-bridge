@@ -3,24 +3,42 @@ import EventKit
 import AppleBridgeProtocol
 
 private let reminderPrefix = "x-apple-reminder://"
-private let fetchTimeoutSeconds: TimeInterval = 25
 
 func dispatchReminder(_ request: BridgeRequest, store: EKEventStore) -> BridgeResponse {
+    let deadline = Deadline()
     switch request.command {
     case .lists:
-        return BridgeResponse(ok: true, result: jsonValue(from: reminderListsOnMain(store: store)))
+        return respond { try listsPage(store: store, deadline: deadline) }
     case .reminders:
-        return respond { try readReminders(request, store: store) }
+        return respond { try readReminders(request, store: store, deadline: deadline) }
     case .create:
-        return respond { try createReminder(request, store: store) }
+        return respond { try createReminder(request, store: store, deadline: deadline) }
     case .update:
-        return respond { try updateReminder(request, store: store) }
+        return respond { try updateReminder(request, store: store, deadline: deadline) }
     case .delete:
-        return respond { try deleteReminder(request, store: store) }
+        return respond { try deleteReminder(request, store: store, deadline: deadline) }
     }
 }
 
-private func readReminders(_ request: BridgeRequest, store: EKEventStore) throws -> ReminderPage {
+/// Lists live here rather than in main.swift so every EventKit hop sits in one
+/// file and shares the request deadline. The main-queue hop is defensive, not
+/// proven necessary — the original no-response bug was a deallocated dispatch
+/// source (see acceptSource in main.swift).
+func listsPage(store: EKEventStore, deadline: Deadline) throws -> [ListInfo] {
+    try onMain(deadline, hop: "list lookup") {
+        let defaultId = store.defaultCalendarForNewReminders()?.calendarIdentifier
+        return store.calendars(for: .reminder).map { calendar in
+            ListInfo(
+                id: calendar.calendarIdentifier,
+                name: calendar.title,
+                isDefault: calendar.calendarIdentifier == defaultId)
+        }
+    }
+}
+
+private func readReminders(
+    _ request: BridgeRequest, store: EKEventStore, deadline: Deadline
+) throws -> ReminderPage {
     // flagged true narrows the page. flagged false does not filter, and reading
     // the flag is not a write, so this path does not call rejectFlag.
     let query = ReminderQuery(
@@ -31,19 +49,40 @@ private func readReminders(_ request: BridgeRequest, store: EKEventStore) throws
         flagged: request.flagged,
         priority: request.priority,
         limit: request.limit)
-    let calendar = try onMain { try calendarForQuery(store: store, request: request) }
-    let items = try fetchReminders(store: store, calendar: calendar)
-    let records = try onMain { try items.map { try makeRecord($0) } }
-    return try reminderPage(records: records, query: query)
+    let calendars = try onMain(deadline, hop: "list lookup") {
+        try calendarsForQuery(store: store, request: request)
+    }
+    let items = try fetchReminders(store: store, calendars: calendars, deadline: deadline)
+    let records = try onMain(deadline, hop: "reminder read") {
+        try items.map { try makeRecord($0) }
+    }
+    return try reminderPage(
+        records: records,
+        query: query,
+        scope: readScope(request: request, calendars: calendars))
 }
 
-private func createReminder(_ request: BridgeRequest, store: EKEventStore) throws -> ReminderRecord {
-    try rejectFlag(flagged: request.flagged, updating: false)
+/// How to describe what this read covered, so an empty page can be told apart from a
+/// wrong question. `list` omitted means the default list — the trap that made "are my
+/// reminders gone?" look true when only one of four lists was being read.
+private func readScope(request: BridgeRequest, calendars: [EKCalendar]) -> String {
+    let query = request.list ?? request.listId
+    if let query, isAllLists(query) {
+        return "all \(calendars.count) lists"
+    }
+    let title = calendars.first?.title ?? "unknown"
+    return query == nil ? "default list \"\(title)\"" : "list \"\(title)\""
+}
+
+private func createReminder(
+    _ request: BridgeRequest, store: EKEventStore, deadline: Deadline
+) throws -> ReminderRecord {
+    try rejectFlag(flagged: request.flagged)
     let title = try normalizeTitle(request.title ?? "")
     let priority = try priorityInt(request.priority ?? "none")
     let due = try request.due.map { try parseDue($0) }
     let notes = request.notes ?? ""
-    return try onMain {
+    return try onMain(deadline, hop: "reminder create") {
         let calendar = try calendarForQuery(store: store, request: request)
         let reminder = EKReminder(eventStore: store)
         reminder.calendar = calendar
@@ -58,9 +97,11 @@ private func createReminder(_ request: BridgeRequest, store: EKEventStore) throw
     }
 }
 
-private func updateReminder(_ request: BridgeRequest, store: EKEventStore) throws -> ReminderRecord {
+private func updateReminder(
+    _ request: BridgeRequest, store: EKEventStore, deadline: Deadline
+) throws -> ReminderRecord {
     let id = request.reminderId ?? ""
-    try rejectFlag(flagged: request.flagged, updating: true)
+    try rejectFlag(flagged: request.flagged)
     let clearDue = request.clearDue == true
     let changing = request.title != nil || request.notes != nil || request.list != nil
         || request.listId != nil || request.due != nil || request.priority != nil
@@ -69,7 +110,7 @@ private func updateReminder(_ request: BridgeRequest, store: EKEventStore) throw
     let title = try request.title.map { try normalizeTitle($0) }
     let priority = try request.priority.map { try priorityInt($0) }
     let due = try request.due.map { try parseDue($0) }
-    return try onMain {
+    return try onMain(deadline, hop: "reminder update") {
         let reminder = try findReminder(store, id: id)
         if let title {
             reminder.title = title
@@ -96,9 +137,11 @@ private func updateReminder(_ request: BridgeRequest, store: EKEventStore) throw
     }
 }
 
-private func deleteReminder(_ request: BridgeRequest, store: EKEventStore) throws -> DeletedReminder {
+private func deleteReminder(
+    _ request: BridgeRequest, store: EKEventStore, deadline: Deadline
+) throws -> DeletedReminder {
     let id = request.reminderId ?? ""
-    return try onMain {
+    return try onMain(deadline, hop: "reminder delete") {
         let reminder = try findReminder(store, id: id)
         let deleted = DeletedReminder(
             id: reminder.calendarItemIdentifier,
@@ -109,8 +152,17 @@ private func deleteReminder(_ request: BridgeRequest, store: EKEventStore) throw
     }
 }
 
-private func calendarForQuery(store: EKEventStore, request: BridgeRequest) throws -> EKCalendar {
+/// The calendars a read should cover. `list: "all"` means every visible list; an
+/// identifier or title means exactly one; omitting it means the default list.
+private func calendarsForQuery(store: EKEventStore, request: BridgeRequest) throws -> [EKCalendar] {
     store.refreshSourcesIfNecessary()
+    if let query = request.list ?? request.listId, isAllLists(query) {
+        let all = store.calendars(for: .reminder).filter { $0.title != "Recently Deleted" }
+        if all.isEmpty {
+            throw ReminderFailure("No Reminders lists are available.")
+        }
+        return all
+    }
     let lists = visibleLists(store)
     if let query = request.list ?? request.listId {
         let resolved = try resolveList(lists, query: query)
@@ -119,13 +171,13 @@ private func calendarForQuery(store: EKEventStore, request: BridgeRequest) throw
         }) else {
             throw ReminderFailure("No list named \"\(query)\".")
         }
-        return calendar
+        return [calendar]
     }
     guard let calendar = store.defaultCalendarForNewReminders(),
           lists.contains(where: { $0.id == calendar.calendarIdentifier }) else {
         throw ReminderFailure("No default Reminders list is available.")
     }
-    return calendar
+    return [calendar]
 }
 
 private func visibleLists(_ store: EKEventStore) -> [ListRef] {
@@ -134,20 +186,32 @@ private func visibleLists(_ store: EKEventStore) -> [ListRef] {
         .map { ListRef(id: $0.calendarIdentifier, name: $0.title) }
 }
 
-private func fetchReminders(store: EKEventStore, calendar: EKCalendar) throws -> [EKReminder] {
+/// The one calendar a write should target. `"all"` is a read scope, not a list you can
+/// move a reminder into, so it is refused here rather than silently picking one.
+private func calendarForQuery(store: EKEventStore, request: BridgeRequest) throws -> EKCalendar {
+    let calendars = try calendarsForQuery(store: store, request: request)
+    guard calendars.count == 1 else {
+        throw ReminderFailure(
+            "\"all\" reads every list; it is not a list you can write to. Name one list.")
+    }
+    return calendars[0]
+}
+
+private func fetchReminders(
+    store: EKEventStore, calendars: [EKCalendar], deadline: Deadline
+) throws -> [EKReminder] {
     precondition(!Thread.isMainThread, "must not block the main queue")
     let gate = DispatchSemaphore(value: 0)
     var fetched: [EKReminder]?
     DispatchQueue.main.async {
-        let predicate = store.predicateForReminders(in: [calendar])
+        let predicate = store.predicateForReminders(in: calendars)
         store.fetchReminders(matching: predicate) { reminders in
             fetched = reminders ?? []
             gate.signal()
         }
     }
-    if gate.wait(timeout: .now() + fetchTimeoutSeconds) == .timedOut {
-        throw ReminderFailure("Reminders did not answer within 25 seconds.")
-    }
+    // A late callback writes the captured box after we throw; nobody reads it.
+    try deadline.claim(gate, hop: "reminder fetch")
     return fetched ?? []
 }
 
@@ -237,7 +301,9 @@ private func remove(_ store: EKEventStore, _ reminder: EKReminder) throws {
     }
 }
 
-private func onMain<T>(_ work: @escaping () throws -> T) throws -> T {
+private func onMain<T>(
+    _ deadline: Deadline, hop: String, _ work: @escaping () throws -> T
+) throws -> T {
     precondition(!Thread.isMainThread, "must not block the main queue")
     var value: Result<T, Error>?
     let gate = DispatchSemaphore(value: 0)
@@ -245,9 +311,10 @@ private func onMain<T>(_ work: @escaping () throws -> T) throws -> T {
         value = Result(catching: work)
         gate.signal()
     }
-    gate.wait()
+    // A late work item writes the captured box after we throw; nobody reads it.
+    try deadline.claim(gate, hop: hop)
     guard let value else {
-        throw ReminderFailure("Reminders failed: the main queue did not answer")
+        throw ReminderFailure("Reminders failed: \(hop) produced no result")
     }
     return try value.get()
 }

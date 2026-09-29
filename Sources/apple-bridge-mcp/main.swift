@@ -21,6 +21,8 @@ enum MCPError: Error, CustomStringConvertible {
     case posix(String, Int32)
     case helperClosed
     case notConnected
+    /// The helper accepted the request but did not finish its answer in time.
+    case timedOut(hop: String, seconds: Int)
 
     var description: String {
         switch self {
@@ -30,21 +32,25 @@ enum MCPError: Error, CustomStringConvertible {
             return "helper closed the connection mid-response"
         case .notConnected:
             return "not connected to the helper"
+        case .timedOut(let hop, let seconds):
+            return "no complete response from the helper: \(hop) did not answer within \(seconds) seconds"
         }
     }
 
     /// Connection loss. The caller may drop the fd and try the call once more.
     /// Reads are safe to resend. Create, update, and delete are not.
+    /// A timeout is not reconnectable: silence does not prove the connection died,
+    /// and the request may already have been applied.
     var reconnectable: Bool {
         switch self {
         case .helperClosed:
             return true
+        case .timedOut, .notConnected:
+            return false
         case .posix(_, let code):
             return code == EPIPE || code == ECONNRESET || code == ENOTCONN
                 || code == ECONNABORTED || code == EAGAIN || code == EWOULDBLOCK
                 || code == ETIMEDOUT
-        case .notConnected:
-            return false
         }
     }
 }
@@ -55,6 +61,10 @@ final class HelperClient {
     private var fd: Int32 = -1
     /// A helper that accepts and never answers must not stall the stdio loop.
     private static let ioTimeoutSeconds: time_t = 30
+    /// One budget per request, shared by a retry so two attempts cannot stack to 60s.
+    /// Deliberately above the helper's own 25s `Deadline`, so the helper's more
+    /// specific error (which names the stuck hop) reaches the agent first.
+    private static let responseBudgetSeconds: TimeInterval = 30
 
     private func closeFd() {
         if fd >= 0 {
@@ -99,35 +109,37 @@ final class HelperClient {
     /// `retry` resends after a dropped connection. Pass false for a mutation:
     /// the write may already have been applied.
     func send(_ request: BridgeRequest, retry: Bool = true) throws -> BridgeResponse {
+        let deadline = Deadline(seconds: Self.responseBudgetSeconds)
         try ensureConnected()
         do {
-            return try exchange(request)
+            return try exchange(request, deadline: deadline)
         } catch let error as MCPError where error.reconnectable {
             closeFd()
             guard retry else { throw error }
             try ensureConnected()
-            return try exchange(request)
+            return try exchange(request, deadline: deadline)
         }
     }
 
-    private func exchange(_ request: BridgeRequest) throws -> BridgeResponse {
+    private func exchange(_ request: BridgeRequest, deadline: Deadline) throws -> BridgeResponse {
         var payload = try JSONEncoder().encode(request)
         payload.append(UInt8(ascii: "\n"))
         let writeError = writeAll(fd: fd, data: payload)
         if writeError != 0 {
             throw MCPError.posix("write to helper failed", writeError)
         }
-        var buffer = Data()
-        var byte: UInt8 = 0
-        while true {
-            let count = Darwin.read(fd, &byte, 1)
-            if count < 0 {
-                if errno == EINTR { continue }
-                throw MCPError.posix("read from helper failed", errno)
+        let buffer: Data
+        do {
+            buffer = try readFrame(fd: fd, deadline: deadline, hop: "helper response")
+        } catch let error as FrameReadError {
+            switch error {
+            case .timeout(let hop, let seconds):
+                throw MCPError.timedOut(hop: hop, seconds: seconds)
+            case .closed:
+                throw MCPError.helperClosed
+            case .posix(let code):
+                throw MCPError.posix("read from helper failed", code)
             }
-            if count == 0 { throw MCPError.helperClosed }
-            if byte == UInt8(ascii: "\n") { break }
-            buffer.append(byte)
         }
         return try JSONDecoder().decode(BridgeResponse.self, from: buffer)
     }
@@ -179,39 +191,60 @@ struct RPCResponse: Encodable {
 // MARK: - MCP surface
 
 let serverName = "apple-bridge"
-let serverVersion = "0.2.0"
+let serverVersion = "0.3.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 let serverInstructions =
     "This server reads and writes the macOS Reminders of the user running the process. "
-    + "Call lists before using any list other than the default. "
-    + "Unfiltered reminders_read returns incomplete reminders on the default list, "
-    + "soonest due first, at most 50. "
-    + "Use the reminder id from a read or create result for reminders_update and reminders_delete. "
-    + "Do not invent ids. Delete removes the reminder from its list. "
+    + "RULE FOR EVERY READ: each field you send NARROWS the result. Omit a field to apply "
+    + "no filter. A permissive-looking value (a wide date range, one letter, 'none', false) "
+    + "is a filter, not a no-op. "
+    + "To read everything on every list, call reminders_all with no arguments. "
+    + "Call lists to get list names and ids. "
+    + "Use the reminder id from a read or create result for reminders_update and "
+    + "reminders_delete. Do not invent ids. Delete removes the reminder from its list. "
     + "The flag cannot be read or changed. "
     + "Recurrence, alarms, tags, URLs, locations, and subtasks are unavailable."
 
 let toolDefinitions: JSONValue = .array([
     tool(
         "lists",
-        "List the user's Reminders lists. Each entry has id (an EventKit "
-            + "calendarIdentifier — use this to address a list), name, and isDefault.",
+        "List the user's Reminders lists. Each entry has id (an EventKit calendarIdentifier "
+            + "— use this to address a list), name, and isDefault. Takes no arguments.",
+        objectSchema([:])),
+    tool(
+        "reminders_all",
+        "Read every reminder on every list — open AND completed — in one call, with no "
+            + "arguments. Use this for 'all my reminders' or 'what is on every list'; it "
+            + "cannot be narrowed by mistake. Each record carries list and list_id. Open "
+            + "reminders come first, soonest due first, then completed. Up to 100 records; "
+            + "read matched and truncated in the result.",
         objectSchema([:])),
     tool(
         "reminders_read",
-        "Read reminders from one list. Omit list for the default list. "
-            + "Open reminders come back soonest due first, undated last.",
+        "Read reminders from ONE list, or from every list with list: \"all\". "
+            + "RULE: every field you send NARROWS the result — to apply no filter, omit it. "
+            + "due_after and due_before EXCLUDE reminders that have no due date, so never use "
+            + "a wide window to mean 'no limit'. "
+            + "search is a real substring match; do not send a single letter. "
+            + "priority 'none' means reminders with no priority set, not 'any priority'. "
+            + "flagged is read-only: omit it. Omitting status returns open reminders only.",
         objectSchema([
-            "list": field("string", "List name or list id. Omit for the default list."),
-            "status": field("string", "open, completed, or any. Defaults to open.",
+            "list": field("string", "OPTIONAL — omit to not filter. List name, list id, or "
+                + "\"all\" for every visible list. Omitting reads the default list."),
+            "status": field("string", "OPTIONAL — omit for open only.",
                             choices: ["open", "completed", "any"]),
-            "search": field("string", "Case-insensitive substring of the title or notes."),
-            "due_after": field("string", "Inclusive lower due bound. A date covers that whole local day."),
-            "due_before": field("string", "Inclusive upper due bound."),
-            "flagged": field("boolean", "True keeps flagged reminders. False does not filter."),
-            "priority": field("string", "none, low, medium, or high.",
+            "search": field("string", "OPTIONAL — omit to not filter. Case-insensitive substring "
+                + "of the title or notes. A blank value counts as omitted."),
+            "due_after": field("string", "OPTIONAL — omit to not filter. Inclusive lower due "
+                + "bound. A date covers that whole local day. EXCLUDES reminders with no due date."),
+            "due_before": field("string", "OPTIONAL — omit to not filter. Inclusive upper due "
+                + "bound. EXCLUDES reminders with no due date."),
+            "flagged": field("boolean", "OPTIONAL — omit. true keeps flagged reminders, which "
+                + "EventKit cannot report, so the page comes back empty. false does not filter."),
+            "priority": field("string", "OPTIONAL — omit to not filter. 'none' selects reminders "
+                + "that have no priority set.",
                               choices: ["none", "low", "medium", "high"]),
-            "limit": field("integer", "Page size from 1 to 100. Defaults to 50."),
+            "limit": field("integer", "OPTIONAL — omit for 50. Page size from 1 to 100."),
         ])),
     tool(
         "reminders_create",
@@ -223,7 +256,9 @@ let toolDefinitions: JSONValue = .array([
             "due": field("string", "Calendar date (all-day) or local datetime. A zoned datetime is converted."),
             "priority": field("string", "none, low, medium, or high.",
                               choices: ["none", "low", "medium", "high"]),
-            "flagged": field("boolean", "Whether the new reminder is flagged. Only false is accepted."),
+            "flagged": field("boolean",
+                             "Whether the new reminder is flagged. Only false is accepted; "
+                             + "EventKit cannot set the flag."),
         ], required: ["title"])),
     tool(
         "reminders_update",
@@ -237,7 +272,9 @@ let toolDefinitions: JSONValue = .array([
             "clear_due": field("boolean", "Remove the due date. Do not send this together with due."),
             "priority": field("string", "none, low, medium, or high.",
                               choices: ["none", "low", "medium", "high"]),
-            "flagged": field("boolean", "Flag or unflag. EventKit cannot change the flag."),
+            "flagged": field("boolean",
+                             "EventKit cannot change the flag, so omit this field. Passing false "
+                             + "is a no-op; passing true fails."),
             "completed": field("boolean", "Complete or reopen."),
         ], required: ["id"])),
     tool(
@@ -347,6 +384,16 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
     case "lists":
         try rejectUnknown(arguments, allowed: [])
         return ToolCall(request: BridgeRequest(command: .lists), retry: true)
+    case "reminders_all":
+        // No arguments to get wrong: every list, every status, the widest page.
+        try rejectUnknown(arguments, allowed: [])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .reminders,
+                list: allListsSentinel,
+                status: "any",
+                limit: 100),
+            retry: true)
     case "reminders_read":
         try rejectUnknown(
             arguments,
@@ -354,12 +401,12 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
         return ToolCall(
             request: BridgeRequest(
                 command: .reminders,
-                list: try stringField(arguments, "list"),
-                status: try stringField(arguments, "status"),
-                search: try stringField(arguments, "search"),
-                dueAfter: try stringField(arguments, "due_after"),
-                dueBefore: try stringField(arguments, "due_before"),
-                priority: try stringField(arguments, "priority"),
+                list: try optionalField(arguments, "list"),
+                status: try optionalField(arguments, "status"),
+                search: try optionalField(arguments, "search"),
+                dueAfter: try optionalField(arguments, "due_after"),
+                dueBefore: try optionalField(arguments, "due_before"),
+                priority: try optionalField(arguments, "priority"),
                 limit: try limitField(arguments, "limit"),
                 flagged: try boolField(arguments, "flagged")),
             retry: true)
@@ -370,9 +417,9 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
                 command: .create,
                 title: try stringField(arguments, "title") ?? "",
                 notes: try stringField(arguments, "notes"),
-                due: try stringField(arguments, "due"),
-                list: try stringField(arguments, "list"),
-                priority: try stringField(arguments, "priority"),
+                due: try optionalField(arguments, "due"),
+                list: try optionalField(arguments, "list"),
+                priority: try optionalField(arguments, "priority"),
                 flagged: try boolField(arguments, "flagged")),
             retry: false)
     case "reminders_update":
@@ -385,10 +432,10 @@ func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
                 reminderId: try stringField(arguments, "id") ?? "",
                 title: try stringField(arguments, "title"),
                 notes: try stringField(arguments, "notes"),
-                due: try stringField(arguments, "due"),
+                due: try optionalField(arguments, "due"),
                 completed: try boolField(arguments, "completed"),
-                list: try stringField(arguments, "list"),
-                priority: try stringField(arguments, "priority"),
+                list: try optionalField(arguments, "list"),
+                priority: try optionalField(arguments, "priority"),
                 clearDue: try boolField(arguments, "clear_due"),
                 flagged: try boolField(arguments, "flagged")),
             retry: false)
@@ -426,6 +473,16 @@ func stringField(_ args: [String: JSONValue], _ key: String) throws -> String? {
         throw ArgFailure("\(key) must be a string.")
     }
     return text
+}
+
+/// For filter fields: a blank value from a weak caller means "no filter", not "match
+/// the empty string". Models routinely fill every optional field with '' — treating it
+/// as a filter made reads fail on blankSearch or return nothing.
+/// NOT used for `notes` on update, where an empty string is a real value (it clears
+/// the note), nor for `title`, where it must still be rejected.
+func optionalField(_ args: [String: JSONValue], _ key: String) throws -> String? {
+    guard let text = try stringField(args, key) else { return nil }
+    return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
 }
 
 func boolField(_ args: [String: JSONValue], _ key: String) throws -> Bool? {

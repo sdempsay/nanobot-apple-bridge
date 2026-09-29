@@ -172,32 +172,4 @@ func handleRequest(_ data: Data, store: EKEventStore) -> BridgeResponse {
     return dispatchReminder(request, store: store)
 }
 
-/// Defensive marshaling: EventKit's synchronous accessors are called on the main
-/// queue here. NOTE: this was NOT proven necessary — the original no-response bug
-/// turned out to be a deallocated dispatch source (see acceptSource). Keeping the
-/// main-queue hop because EKEventStore is safest used from a consistent queue and
-/// it costs one dispatch. This runs on a connection queue, never on main, so the
-/// semaphore wait cannot deadlock the main queue.
-func reminderListsOnMain(store: EKEventStore) -> [ListInfo] {
-    precondition(!Thread.isMainThread, "must not block the main queue")
-    var lists: [ListInfo] = []
-    let gate = DispatchSemaphore(value: 0)
-    DispatchQueue.main.async {
-        lists = reminderLists(store: store)
-        gate.signal()
-    }
-    gate.wait()
-    return lists
-}
-
-func reminderLists(store: EKEventStore) -> [ListInfo] {
-    let defaultId = store.defaultCalendarForNewReminders()?.calendarIdentifier
-    return store.calendars(for: .reminder).map { calendar in
-        ListInfo(
-            id: calendar.calendarIdentifier,
-            name: calendar.title,
-            isDefault: calendar.calendarIdentifier == defaultId)
-    }
-}
-
 dispatchMain()

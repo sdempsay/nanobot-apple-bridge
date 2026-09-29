@@ -83,3 +83,65 @@ public func writeAll(fd: Int32, data: Data) -> Int32 {
     }
     return 0
 }
+
+/// Why reading one response frame failed.
+public enum FrameReadError: Error, CustomStringConvertible {
+    /// The peer never finished the frame inside the request's time budget.
+    /// `hop` names the side that went quiet.
+    case timeout(hop: String, budgetSeconds: Int)
+    /// The peer closed the connection mid-frame.
+    case closed
+    /// `read` or `poll` failed for another reason.
+    case posix(Int32)
+
+    public var description: String {
+        switch self {
+        case .timeout(let hop, let seconds):
+            return "no complete response from the helper: \(hop) did not answer within \(seconds) seconds"
+        case .closed:
+            return "helper closed the connection mid-response"
+        case .posix(let code):
+            return "read from helper failed (\(String(cString: strerror(code))))"
+        }
+    }
+}
+
+/// Read exactly one `\n`-terminated frame, bounded by `deadline`.
+///
+/// Byte at a time on purpose: a chunked read would swallow bytes belonging to the
+/// next response on a reused connection. The cost is that a socket `SO_RCVTIMEO`
+/// bounds only a single `read`, so a peer that dribbles one byte every 29 seconds
+/// could hold an exchange open forever. `poll` against `deadline.secondsLeft` before
+/// each byte caps the *whole frame* at one budget, however the peer paces itself —
+/// and the wait can never compound past it.
+public func readFrame(fd: Int32, deadline: Deadline, hop: String) throws -> Data {
+    var buffer = Data()
+    var byte: UInt8 = 0
+    while true {
+        let left = deadline.secondsLeft
+        if left <= 0 {
+            throw FrameReadError.timeout(hop: hop, budgetSeconds: Int(deadline.budgetSeconds))
+        }
+        var waiter = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&waiter, 1, Int32((left * 1000).rounded(.up)))
+        if ready == 0 {
+            throw FrameReadError.timeout(hop: hop, budgetSeconds: Int(deadline.budgetSeconds))
+        }
+        if ready < 0 {
+            if errno == EINTR { continue }
+            throw FrameReadError.posix(errno)
+        }
+        let count = Darwin.read(fd, &byte, 1)
+        if count < 0 {
+            if errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { continue }
+            throw FrameReadError.posix(errno)
+        }
+        if count == 0 {
+            throw FrameReadError.closed
+        }
+        if byte == UInt8(ascii: "\n") {
+            return buffer
+        }
+        buffer.append(byte)
+    }
+}

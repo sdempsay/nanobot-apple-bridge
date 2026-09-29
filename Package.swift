@@ -21,8 +21,9 @@ let package = Package(
     name: "apple-bridge",
     platforms: [.macOS(.v14)],
     targets: [
-        // Shared wire types only. No EventKit here — the privacy API stays out of
-        // everything except the helper target (see README).
+        // Shared wire types plus the pure logic that is testable without EventKit
+        // (socket builder, writeAll, rules, deadline). No EventKit here — the
+        // privacy API stays out of everything except the helper target (see README).
         .target(
             name: "AppleBridgeProtocol",
             swiftSettings: [.swiftLanguageMode(.v5)]

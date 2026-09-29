@@ -81,15 +81,20 @@ final class RemindersRulesTests: XCTestCase {
         }
     }
 
-    func testRejectFlagAllowsOnlyACreateTimeFalse() throws {
-        try rejectFlag(flagged: nil, updating: false)
-        try rejectFlag(flagged: nil, updating: true)
-        try rejectFlag(flagged: false, updating: false)
-        XCTAssertThrowsError(try rejectFlag(flagged: true, updating: false)) { error in
+    func testRejectFlagTreatsFalseAsANoOpEverywhere() throws {
+        // Omitted and false never fail — on create or update. A record read back
+        // carries `flagged: false`, so update must tolerate echoing it.
+        try rejectFlag(flagged: nil)
+        try rejectFlag(flagged: false)
+        // true is impossible through EventKit and says what to do instead.
+        XCTAssertThrowsError(try rejectFlag(flagged: true)) { error in
             XCTAssertEqual(error as? ReminderFailure, ReminderFailure(ReminderText.flagUnavailable))
         }
-        XCTAssertThrowsError(try rejectFlag(flagged: false, updating: true)) { error in
-            XCTAssertEqual(error as? ReminderFailure, ReminderFailure(ReminderText.flagUnavailable))
+        XCTAssertThrowsError(try rejectFlag(flagged: true)) { error in
+            let message = (error as? ReminderFailure)?.message ?? ""
+            XCTAssertTrue(
+                message.contains("omit the flagged field"),
+                "error should tell the caller how to recover, got: \(message)")
         }
     }
 
@@ -194,5 +199,67 @@ final class RemindersRulesTests: XCTestCase {
             flagged: false,
             completed: completed,
             completionTime: nil)
+    }
+
+    func testAllListsSentinelIsTolerantButNotLoose() {
+        XCTAssertTrue(isAllLists("all"))
+        XCTAssertTrue(isAllLists("  ALL "))
+        XCTAssertFalse(isAllLists(""))
+        XCTAssertFalse(isAllLists("Work"))
+        XCTAssertFalse(isAllLists("all-ish"))
+        XCTAssertFalse(isAllLists("all 1"))
+    }
+
+    func testPageEchoesOnlyTheFiltersThatNarrow() throws {
+        let records = [
+            sample("1", title: "Dated", due: "2026-01-05", allDay: true),
+            sample("2", title: "Undated"),
+        ]
+        let page = try reminderPage(
+            records: records,
+            query: ReminderQuery(
+                status: "any", dueAfter: "2000-01-01", dueBefore: "2100-12-31",
+                priority: "none"),
+            zone: zone,
+            scope: "all 4 lists")
+        XCTAssertEqual(page.scope, "all 4 lists")
+        XCTAssertEqual(page.matched, 1)
+        XCTAssertEqual(page.filters?["due"], "2000-01-01..2100-12-31")
+        XCTAssertEqual(page.filters?["priority"], "none")
+        XCTAssertNil(page.filters?["status"], "any is not a filter")
+        XCTAssertTrue(page.note?.contains("excluded by the due window") ?? false,
+                      "\(String(describing: page.note))")
+    }
+
+    func testPageNoteSaysWhenNothingMatchedButRecordsExist() throws {
+        let page = try reminderPage(
+            records: [sample("1", title: "Real thing")],
+            query: ReminderQuery(status: "any", search: "zzz"),
+            zone: zone,
+            scope: "list \"Work\"")
+        XCTAssertEqual(page.matched, 0)
+        XCTAssertTrue(page.note?.contains("1 reminder(s) exist in this scope") ?? false,
+                      "\(String(describing: page.note))")
+    }
+
+    func testDefaultListEmptyReadPointsAtRemindersAll() throws {
+        let page = try reminderPage(
+            records: [],
+            query: ReminderQuery(),
+            zone: zone,
+            scope: "default list \"Reminders\"")
+        XCTAssertEqual(page.filters, ["status": "open"], "omitting status still filters")
+        XCTAssertTrue(page.note?.contains("reminders_all") ?? false,
+                      "\(String(describing: page.note))")
+    }
+
+    func testHealthyPageCarriesNoNoteAndNoFilters() throws {
+        let page = try reminderPage(
+            records: [sample("1", title: "Thing")],
+            query: ReminderQuery(status: "any"),
+            zone: zone,
+            scope: "all 4 lists")
+        XCTAssertNil(page.note)
+        XCTAssertNil(page.filters)
     }
 }

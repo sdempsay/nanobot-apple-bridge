@@ -22,7 +22,8 @@ public enum ReminderText {
     public static let dueAndClear = "Pass either due or clear_due, not both."
     public static let emptyUpdate = "Update needs at least one field to change."
     public static let blankSearch = "Search must not be empty."
-    public static let flagUnavailable = "The flag is not available through EventKit."
+    public static let flagUnavailable =
+        "The flag is not available through EventKit — omit the flagged field and retry."
     public static let defaultPageSize = 50
 }
 
@@ -142,6 +143,33 @@ public struct ReminderPage: Codable, Equatable {
     public var reminders: [ReminderRecord]
     public var matched: Int
     public var truncated: Bool
+    /// What the read actually covered, e.g. `all 4 lists`, `list "Work"`, or
+    /// `default list "Reminders"`. A caller that asked for "everything" and got a
+    /// default-list-only read needs to see this.
+    public var scope: String?
+    /// Only the filters that really narrowed the read. Empty means unfiltered.
+    /// Weak callers stuff `due_after`/`priority`/`search` with permissive-looking
+    /// values that are in fact filters; echoing them makes a `matched: 0` explainable.
+    public var filters: [String: String]?
+    /// One line of guidance, present only when the result is likely to surprise the
+    /// caller (nothing matched, or a due window silently dropped undated reminders).
+    public var note: String?
+
+    public init(
+        reminders: [ReminderRecord],
+        matched: Int,
+        truncated: Bool,
+        scope: String? = nil,
+        filters: [String: String]? = nil,
+        note: String? = nil
+    ) {
+        self.reminders = reminders
+        self.matched = matched
+        self.truncated = truncated
+        self.scope = scope
+        self.filters = filters
+        self.note = note
+    }
 }
 
 public struct ReminderQuery {
@@ -254,12 +282,13 @@ public func priorityName(_ raw: Int, reminderId: String) throws -> String {
     }
 }
 
-/// EventKit has no flag. Omitting it, or creating with `false`, is a no-op.
-public func rejectFlag(flagged: Bool?, updating: Bool) throws {
-    guard let flagged else {
-        return
-    }
-    if !updating && !flagged {
+/// EventKit cannot read or write the flag, so `true` is impossible and fails.
+/// `false` (or omitted) is a truthful no-op on create *and* update: every record
+/// already reports `flagged: false`, so that end state holds. Update used to
+/// reject `false`, which broke the common read → echo → update loop, because a
+/// record read back carries `flagged: false`.
+public func rejectFlag(flagged: Bool?) throws {
+    guard flagged == true else {
         return
     }
     throw ReminderFailure(ReminderText.flagUnavailable)
@@ -272,6 +301,16 @@ public func validateUpdate(changing: Bool, due: String?, clearDue: Bool) throws 
     if !changing && !clearDue {
         throw ReminderFailure(ReminderText.emptyUpdate)
     }
+}
+
+/// `list: "all"` reads every visible list in one call. Weak callers otherwise have
+/// to loop lists and merge pages themselves, which is where reminders get dropped.
+/// Reserved word: a list literally named "all" is still reachable by its
+/// calendarIdentifier, and an identifier always wins over a title.
+public let allListsSentinel = "all"
+
+public func isAllLists(_ query: String) -> Bool {
+    query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == allListsSentinel
 }
 
 public func resolveList(_ lists: [ListRef], query: String) throws -> ListRef {
@@ -298,7 +337,8 @@ public func reminderPage(
     records: [ReminderRecord],
     query: ReminderQuery,
     pageSize: Int = ReminderText.defaultPageSize,
-    zone: TimeZone = .current
+    zone: TimeZone = .current,
+    scope: String? = nil
 ) throws -> ReminderPage {
     let status = query.status ?? "open"
     if status != "open" && status != "completed" && status != "any" {
@@ -319,10 +359,71 @@ public func reminderPage(
     let matched = records.filter { record in
         matches(record, status: status, query: query, after: after, before: before)
     }.sorted { sortKey($0) < sortKey($1) }
+    let hasWindow = after != nil || before != nil
+    let undatedExcluded = hasWindow ? records.filter { $0.due == nil }.count : 0
     return ReminderPage(
         reminders: Array(matched.prefix(limit)),
         matched: matched.count,
-        truncated: matched.count > limit)
+        truncated: matched.count > limit,
+        scope: scope,
+        filters: effectiveFilters(
+            status: status, query: query, after: query.dueAfter, before: query.dueBefore),
+        note: pageNote(
+            matched: matched.count, fetched: records.count, scope: scope,
+            undatedExcluded: undatedExcluded, hasWindow: hasWindow))
+}
+
+/// The filters that actually narrowed this read. `status` is always a filter unless it
+/// is `any` — omitting it means open-only, which is the single most common surprise.
+/// `flagged: false` and blank strings are no-ops, so they are not echoed.
+private func effectiveFilters(
+    status: String,
+    query: ReminderQuery,
+    after: String?,
+    before: String?
+) -> [String: String]? {
+    var applied: [String: String] = [:]
+    if status != "any" {
+        applied["status"] = status
+    }
+    if let search = query.search {
+        applied["search"] = search
+    }
+    if let priority = query.priority {
+        applied["priority"] = priority
+    }
+    if query.flagged == true {
+        applied["flagged"] = "true"
+    }
+    if let after, let before {
+        applied["due"] = "\(after)..\(before)"
+    } else if let after {
+        applied["due_after"] = after
+    } else if let before {
+        applied["due_before"] = before
+    }
+    return applied.isEmpty ? nil : applied
+}
+
+/// Only says something when the caller is likely to misread an empty or narrowed page.
+/// This text lands in the model's context on the next turn, so it stays to one line.
+private func pageNote(
+    matched: Int,
+    fetched: Int,
+    scope: String?,
+    undatedExcluded: Int,
+    hasWindow: Bool
+) -> String? {
+    var parts: [String] = []
+    if matched == 0 && fetched > 0 {
+        parts.append("nothing matched these filters; \(fetched) reminder(s) exist in this scope")
+    } else if matched == 0, let scope, scope.hasPrefix("default list") {
+        parts.append("this read covered only \(scope); call reminders_all to read every list")
+    }
+    if hasWindow && undatedExcluded > 0 {
+        parts.append("\(undatedExcluded) reminder(s) with no due date were excluded by the due window — omit due_after/due_before to include them")
+    }
+    return parts.isEmpty ? nil : parts.joined(separator: "; ")
 }
 
 private func matches(
