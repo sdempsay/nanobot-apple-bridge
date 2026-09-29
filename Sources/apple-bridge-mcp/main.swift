@@ -33,8 +33,8 @@ enum MCPError: Error, CustomStringConvertible {
         }
     }
 
-    /// Connection loss. Safe to drop the fd and try the call once more.
-    /// `lists` is idempotent; a later mutating command must not assume that.
+    /// Connection loss. The caller may drop the fd and try the call once more.
+    /// Reads are safe to resend. Create, update, and delete are not.
     var reconnectable: Bool {
         switch self {
         case .helperClosed:
@@ -96,12 +96,15 @@ final class HelperClient {
         fd = candidate
     }
 
-    func send(_ request: BridgeRequest) throws -> BridgeResponse {
+    /// `retry` resends after a dropped connection. Pass false for a mutation:
+    /// the write may already have been applied.
+    func send(_ request: BridgeRequest, retry: Bool = true) throws -> BridgeResponse {
         try ensureConnected()
         do {
             return try exchange(request)
         } catch let error as MCPError where error.reconnectable {
             closeFd()
+            guard retry else { throw error }
             try ensureConnected()
             return try exchange(request)
         }
@@ -176,22 +179,105 @@ struct RPCResponse: Encodable {
 // MARK: - MCP surface
 
 let serverName = "apple-bridge"
-let serverVersion = "0.1.0"
+let serverVersion = "0.2.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
+let serverInstructions =
+    "This server reads and writes the macOS Reminders of the user running the process. "
+    + "Call lists before using any list other than the default. "
+    + "Unfiltered reminders_read returns incomplete reminders on the default list, "
+    + "soonest due first, at most 50. "
+    + "Use the reminder id from a read or create result for reminders_update and reminders_delete. "
+    + "Do not invent ids. Delete removes the reminder from its list. "
+    + "The flag cannot be read or changed. "
+    + "Recurrence, alarms, tags, URLs, locations, and subtasks are unavailable."
 
 let toolDefinitions: JSONValue = .array([
-    .object([
-        "name": .string("lists"),
-        "description": .string(
-            "List the user's Reminders lists. Each entry has id (an EventKit "
-            + "calendarIdentifier — use this to address a list), name, and isDefault."),
-        "inputSchema": .object([
-            "type": .string("object"),
-            "properties": .object([:]),
-            "additionalProperties": .bool(false),
-        ]),
-    ])
+    tool(
+        "lists",
+        "List the user's Reminders lists. Each entry has id (an EventKit "
+            + "calendarIdentifier — use this to address a list), name, and isDefault.",
+        objectSchema([:])),
+    tool(
+        "reminders_read",
+        "Read reminders from one list. Omit list for the default list. "
+            + "Open reminders come back soonest due first, undated last.",
+        objectSchema([
+            "list": field("string", "List name or list id. Omit for the default list."),
+            "status": field("string", "open, completed, or any. Defaults to open.",
+                            choices: ["open", "completed", "any"]),
+            "search": field("string", "Case-insensitive substring of the title or notes."),
+            "due_after": field("string", "Inclusive lower due bound. A date covers that whole local day."),
+            "due_before": field("string", "Inclusive upper due bound."),
+            "flagged": field("boolean", "True keeps flagged reminders. False does not filter."),
+            "priority": field("string", "none, low, medium, or high.",
+                              choices: ["none", "low", "medium", "high"]),
+            "limit": field("integer", "Page size from 1 to 100. Defaults to 50."),
+        ])),
+    tool(
+        "reminders_create",
+        "Create an incomplete reminder. Title is required. Returns the new record.",
+        objectSchema([
+            "title": field("string", "Reminder title."),
+            "notes": field("string", "Note body. Omit for an empty note."),
+            "list": field("string", "List name or list id. Omit for the default list."),
+            "due": field("string", "Calendar date (all-day) or local datetime. A zoned datetime is converted."),
+            "priority": field("string", "none, low, medium, or high.",
+                              choices: ["none", "low", "medium", "high"]),
+            "flagged": field("boolean", "Whether the new reminder is flagged. Only false is accepted."),
+        ], required: ["title"])),
+    tool(
+        "reminders_update",
+        "Patch one reminder by id. Omitted fields stay as they are.",
+        objectSchema([
+            "id": field("string", "Reminder id from reminders_read or reminders_create."),
+            "title": field("string", "Replacement title."),
+            "notes": field("string", "Replacement notes. An empty string clears the notes."),
+            "list": field("string", "Move the reminder to this list name or list id."),
+            "due": field("string", "Replacement due date or time."),
+            "clear_due": field("boolean", "Remove the due date. Do not send this together with due."),
+            "priority": field("string", "none, low, medium, or high.",
+                              choices: ["none", "low", "medium", "high"]),
+            "flagged": field("boolean", "Flag or unflag. EventKit cannot change the flag."),
+            "completed": field("boolean", "Complete or reopen."),
+        ], required: ["id"])),
+    tool(
+        "reminders_delete",
+        "Remove one reminder from its list.",
+        objectSchema([
+            "id": field("string", "Reminder id from reminders_read or reminders_create."),
+        ], required: ["id"])),
 ])
+
+func tool(_ name: String, _ description: String, _ schema: JSONValue) -> JSONValue {
+    .object([
+        "name": .string(name),
+        "description": .string(description),
+        "inputSchema": schema,
+    ])
+}
+
+func objectSchema(_ properties: [String: JSONValue], required: [String] = []) -> JSONValue {
+    var fields: [String: JSONValue] = [
+        "type": .string("object"),
+        "properties": .object(properties),
+        "additionalProperties": .bool(false),
+    ]
+    if !required.isEmpty {
+        fields["required"] = .array(required.map(JSONValue.string))
+    }
+    return .object(fields)
+}
+
+func field(_ type: String, _ description: String, choices: [String]? = nil) -> JSONValue {
+    var fields: [String: JSONValue] = [
+        "type": .string(type),
+        "description": .string(description),
+    ]
+    if let choices {
+        fields["enum"] = .array(choices.map(JSONValue.string))
+    }
+    return .object(fields)
+}
 
 func initializeResult(clientVersion: String?) -> JSONValue {
     let negotiated = clientVersion.flatMap { supportedProtocolVersions.contains($0) ? $0 : nil }
@@ -203,17 +289,31 @@ func initializeResult(clientVersion: String?) -> JSONValue {
             "name": .string(serverName),
             "version": .string(serverVersion),
         ]),
+        "instructions": .string(serverInstructions),
     ])
+}
+
+struct ArgFailure: Error, CustomStringConvertible {
+    var message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var description: String { message }
+}
+
+struct ToolCall {
+    var request: BridgeRequest
+    var retry: Bool
 }
 
 func callTool(_ client: HelperClient, params: [String: JSONValue]?) -> JSONValue {
     var name = ""
     if case .string(let value)? = params?["name"] { name = value }
-    guard name == "lists" else {
-        return toolError("unknown tool '\(name)'")
-    }
     do {
-        let response = try client.send(BridgeRequest(command: .lists))
+        let call = try toolCall(name: name, arguments: try argumentObject(params))
+        let response = try client.send(call.request, retry: call.retry)
         guard response.ok else {
             return toolError(response.error ?? "helper returned an error")
         }
@@ -232,12 +332,123 @@ func callTool(_ client: HelperClient, params: [String: JSONValue]?) -> JSONValue
             ])]),
             "isError": .bool(false),
         ])
+    } catch let error as ArgFailure {
+        return toolError(error.message)
     } catch let error as MCPError {
         return toolError("could not reach the helper: \(error). "
             + "Is apple-bridge-helper running under its LaunchAgent?")
     } catch {
         return toolError("helper call failed: \(error)")
     }
+}
+
+func toolCall(name: String, arguments: [String: JSONValue]) throws -> ToolCall {
+    switch name {
+    case "lists":
+        try rejectUnknown(arguments, allowed: [])
+        return ToolCall(request: BridgeRequest(command: .lists), retry: true)
+    case "reminders_read":
+        try rejectUnknown(
+            arguments,
+            allowed: ["list", "status", "search", "due_after", "due_before", "flagged", "priority", "limit"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .reminders,
+                list: try stringField(arguments, "list"),
+                status: try stringField(arguments, "status"),
+                search: try stringField(arguments, "search"),
+                dueAfter: try stringField(arguments, "due_after"),
+                dueBefore: try stringField(arguments, "due_before"),
+                priority: try stringField(arguments, "priority"),
+                limit: try limitField(arguments, "limit"),
+                flagged: try boolField(arguments, "flagged")),
+            retry: true)
+    case "reminders_create":
+        try rejectUnknown(arguments, allowed: ["title", "notes", "list", "due", "priority", "flagged"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .create,
+                title: try stringField(arguments, "title") ?? "",
+                notes: try stringField(arguments, "notes"),
+                due: try stringField(arguments, "due"),
+                list: try stringField(arguments, "list"),
+                priority: try stringField(arguments, "priority"),
+                flagged: try boolField(arguments, "flagged")),
+            retry: false)
+    case "reminders_update":
+        try rejectUnknown(
+            arguments,
+            allowed: ["id", "title", "notes", "list", "due", "clear_due", "priority", "flagged", "completed"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .update,
+                reminderId: try stringField(arguments, "id") ?? "",
+                title: try stringField(arguments, "title"),
+                notes: try stringField(arguments, "notes"),
+                due: try stringField(arguments, "due"),
+                completed: try boolField(arguments, "completed"),
+                list: try stringField(arguments, "list"),
+                priority: try stringField(arguments, "priority"),
+                clearDue: try boolField(arguments, "clear_due"),
+                flagged: try boolField(arguments, "flagged")),
+            retry: false)
+    case "reminders_delete":
+        try rejectUnknown(arguments, allowed: ["id"])
+        return ToolCall(
+            request: BridgeRequest(
+                command: .delete,
+                reminderId: try stringField(arguments, "id") ?? ""),
+            retry: false)
+    default:
+        throw ArgFailure("unknown tool '\(name)'")
+    }
+}
+
+func argumentObject(_ params: [String: JSONValue]?) throws -> [String: JSONValue] {
+    guard let raw = params?["arguments"] else { return [:] }
+    if case .null = raw { return [:] }
+    guard case .object(let object) = raw else {
+        throw ArgFailure("arguments must be an object.")
+    }
+    return object
+}
+
+func rejectUnknown(_ args: [String: JSONValue], allowed: Set<String>) throws {
+    if let key = args.keys.first(where: { !allowed.contains($0) }) {
+        throw ArgFailure("Unknown argument '\(key)'.")
+    }
+}
+
+func stringField(_ args: [String: JSONValue], _ key: String) throws -> String? {
+    guard let value = args[key] else { return nil }
+    if case .null = value { return nil }
+    guard case .string(let text) = value else {
+        throw ArgFailure("\(key) must be a string.")
+    }
+    return text
+}
+
+func boolField(_ args: [String: JSONValue], _ key: String) throws -> Bool? {
+    guard let value = args[key] else { return nil }
+    if case .null = value { return nil }
+    guard case .bool(let flag) = value else {
+        throw ArgFailure("\(key) must be a boolean.")
+    }
+    return flag
+}
+
+func limitField(_ args: [String: JSONValue], _ key: String) throws -> Int? {
+    guard let value = args[key] else { return nil }
+    if case .null = value { return nil }
+    guard case .number(let number) = value, number.isFinite, number == number.rounded(),
+          number >= Double(Int.min), number <= Double(Int.max) else {
+        throw ArgFailure(ReminderText.badLimit)
+    }
+    let limit = Int(number)
+    guard (1...100).contains(limit) else {
+        throw ArgFailure(ReminderText.badLimit)
+    }
+    return limit
 }
 
 func toolError(_ message: String) -> JSONValue {

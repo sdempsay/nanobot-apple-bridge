@@ -1,9 +1,9 @@
 import Foundation
 
 // Newline-delimited JSON over a Unix domain socket. One BridgeRequest per line,
-// one BridgeResponse per line. Lists are addressed by EventKit calendarIdentifier
-// (`listId`) — never by title, which collides across sources (iCloud and On My
-// Mac both ship a "Reminders" list).
+// one BridgeResponse per line. A list is addressed by EventKit calendarIdentifier.
+// A title is accepted only when exactly one visible list has that name — iCloud
+// and On My Mac both ship a list named "Reminders".
 
 public enum BridgeCommand: String, Codable, CaseIterable {
     case lists
@@ -22,6 +22,16 @@ public struct BridgeRequest: Codable {
     /// ISO 8601 date or datetime, interpreted in the helper's local zone.
     public var due: String?
     public var completed: Bool?
+    /// List name or calendarIdentifier. The helper resolves an id before a title.
+    public var list: String?
+    public var status: String?
+    public var search: String?
+    public var dueAfter: String?
+    public var dueBefore: String?
+    public var priority: String?
+    public var limit: Int?
+    public var clearDue: Bool?
+    public var flagged: Bool?
 
     public init(
         command: BridgeCommand,
@@ -30,7 +40,16 @@ public struct BridgeRequest: Codable {
         title: String? = nil,
         notes: String? = nil,
         due: String? = nil,
-        completed: Bool? = nil
+        completed: Bool? = nil,
+        list: String? = nil,
+        status: String? = nil,
+        search: String? = nil,
+        dueAfter: String? = nil,
+        dueBefore: String? = nil,
+        priority: String? = nil,
+        limit: Int? = nil,
+        clearDue: Bool? = nil,
+        flagged: Bool? = nil
     ) {
         self.command = command
         self.listId = listId
@@ -39,6 +58,15 @@ public struct BridgeRequest: Codable {
         self.notes = notes
         self.due = due
         self.completed = completed
+        self.list = list
+        self.status = status
+        self.search = search
+        self.dueAfter = dueAfter
+        self.dueBefore = dueBefore
+        self.priority = priority
+        self.limit = limit
+        self.clearDue = clearDue
+        self.flagged = flagged
     }
 }
 

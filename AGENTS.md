@@ -107,8 +107,8 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
   `KeepAlive` / `SuccessfulExit` false restarts the job. Do not exit non-zero
   for an expected refusal.
 - The MCP client closes its socket and retries a call once after the helper
-  restarts. `lists` is safe to resend. A mutating command must not assume that
-  retry is exactly-once.
+  restarts. `lists` and `reminders_read` are safe to resend. Create, update,
+  and delete are not retried: the write may already have been applied.
 - Backgrounding the helper inside a tool/exec shell hangs the caller on the
   pipe; run it via the LaunchAgent or redirect and detach properly.
 - `Package.swift` embeds an absolute path to Info.plist via `#filePath` — fine
@@ -127,14 +127,19 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
       identity" below. CORRECTION that preceded it: ad-hoc rebuilds DO re-prompt
       every time (TCC anchors ad-hoc signatures to the cdhash).
 - [x] End-to-end `lists`: MCP stdio → socket → helper → EventKit → real user lists
-- [ ] Milestone 2: `reminders`/`create`/`update`/`delete` (stable signing identity
-      — done)
+- [x] Milestone 2: `reminders` / `create` / `update` / `delete`, exposed as
+      `reminders_read`, `reminders_create`, `reminders_update`, `reminders_delete`
 - [ ] Milestone 3: Calendar commands (second grant flow)
 
 Verified end-to-end sample (2026-09-28): `tools/call lists` returned the user's
 four lists (Reminders [default], Family, Work, For Shawn) with calendarIdentifiers.
 Note: a list named "For Shawn" DOES exist on this Mac — relevant to the old
 mac-reminders "No list named For Shawn" blocker.
+
+Verified again (2026-09-29) through the LaunchAgent: an all-day reminder was
+created on the default list, completed, cleared, and deleted; a timed reminder
+was created on Work by list name and deleted. `~/.nanobot/config.json` was not
+changed. The MCP tool `lists` was not renamed.
 
 ## Recreating the signing identity (one-time, per machine)
 

@@ -9,8 +9,8 @@ import AppleBridgeProtocol
 // parent), so launchd makes it its own responsible process and the TCC grant
 // attaches to this binary's identity, not to whatever terminal hosted it.
 //
-// Milestone 1: request full Reminders access, serve newline-delimited JSON on
-// the Unix socket, answer `lists`. Everything else returns "not implemented".
+// Request full Reminders access, serve newline-delimited JSON on the Unix
+// socket, and answer lists, reminders, create, update, and delete.
 
 let fileManager = FileManager.default
 let socketPath = bridgeSocketPath
@@ -169,14 +169,7 @@ func handleRequest(_ data: Data, store: EKEventStore) -> BridgeResponse {
     guard let request = try? JSONDecoder().decode(BridgeRequest.self, from: data) else {
         return BridgeResponse(ok: false, error: "malformed request")
     }
-    switch request.command {
-    case .lists:
-        return BridgeResponse(ok: true, result: jsonValue(from: reminderListsOnMain(store: store)))
-    default:
-        return BridgeResponse(
-            ok: false,
-            error: "command '\(request.command.rawValue)' is not implemented yet")
-    }
+    return dispatchReminder(request, store: store)
 }
 
 /// Defensive marshaling: EventKit's synchronous accessors are called on the main
