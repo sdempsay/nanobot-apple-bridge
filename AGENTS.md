@@ -47,6 +47,12 @@ printf '%s\n%s\n' \
 With no helper running, `tools/call` returns a graceful `isError` payload naming
 the socket path — that is correct behavior, not a bug.
 
+Writing against the live helper over stdio, which is how the write path was
+verified: drive `tools/call` from Python by writing the two JSON-RPC lines to
+`./.build/debug/apple-bridge-mcp` on stdin and reading the `id: 2` line back.
+Delete anything you create, and re-read to confirm the series you poked is
+intact — 43 occurrences of 3 real series were checked this way.
+
 ## Environment blocker: SwiftPM cannot clone git dependencies
 
 **Symptom:** `swift package resolve` fails with `Failed to clone repository <url>:`
@@ -148,7 +154,7 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
 - `Package.swift` embeds an absolute path to Info.plist via `#filePath` — fine
   for local dev, breaks if the package moves; revisit before any CI.
 
-## Status (2026-09-28)
+## Status
 
 - [x] Package skeleton, three targets, zero dependencies
 - [x] Helper: socket server (0700 dir / 0600 sock verified), `lists` command,
@@ -204,6 +210,11 @@ hand-rolled layer is confined to `apple-bridge-mcp/main.swift`.
 - [x] 2026-09-29: the `org.dempsay` LaunchAgent rename is done. `install.sh` retires
       `com.org.dempsay.…` on every run. **Both grants survived it with no prompt**, and
       they also survived the Calendar usage-string text change — see below.
+- [x] 2026-09-29: the nanobot MCP slot is `apple_bridge` and `calhelper` is removed from
+      `~/.nanobot/config.json`. The repo owns the whole surface the model now sees for
+      Reminders and Calendar, so there is one tool set to guess from rather than two
+      overlapping ones. Note this is caller-side config, not repo config — nothing in
+      this package depends on it.
 
 **Changing the usage string or the LaunchAgent label does not re-prompt.** Verified
 live, not reasoned: with the usage string changed to mention creating/editing/deleting
@@ -249,8 +260,10 @@ designated requirement to the cdhash and invalidating the TCC grant. Unlock with
 `security unlock-keychain ~/Library/Keychains/login.keychain-db` and re-run.
 
 **Naming.** Every identifier this repo owns starts `org.dempsay`. The
-LaunchAgent label was `com.org.dempsay.…` until 741cce2; `install.sh` now retires
-that label on every run so a leftover agent cannot compete for the socket.
+LaunchAgent label was `com.org.dempsay.…` until the rename in `2cbabd1` (PR #13);
+`install.sh` now retires that label on every run so a leftover agent cannot
+compete for the socket. The nanobot MCP slot is `apple_bridge` — see "Calling the
+tools from a weak model".
 
 Verified end-to-end sample (2026-09-28): `tools/call lists` returned the user's
 four lists (Reminders [default], Family, Work, For Shawn) with calendarIdentifiers.
@@ -259,8 +272,9 @@ mac-reminders "No list named For Shawn" blocker.
 
 Verified again (2026-09-29) through the LaunchAgent: an all-day reminder was
 created on the default list, completed, cleared, and deleted; a timed reminder
-was created on Work by list name and deleted. `~/.nanobot/config.json` was not
-changed. The MCP tool `lists` was not renamed.
+was created on Work by list name and deleted. The MCP tool `lists` was not
+renamed. `~/.nanobot/config.json` HAS since changed — the slot is now
+`apple_bridge` and `calhelper` is gone from it.
 
 ## Calling the tools from a weak model
 
@@ -295,11 +309,17 @@ Measured against `gpt-oss:latest` on this Mac (Ollama, temperature 0), using the
   as "the list is empty". It now gets:
   `nothing matched these filters; 13 reminder(s) exist in this scope; 6 reminder(s) with
   no due date were excluded by the due window — omit due_after/due_before to include them`.
-- Caller-side naming gotcha (outside this repo, in `~/.nanobot/config.json`): the slot was
-  `mac-reminders`, so tools were `mcp_mac-reminders_reminders_read`. gpt-oss kept emitting
-  `mcp_mac_reminders_…` with underscores → `error parsing tool call` → 4 retries → model
-  fallback. The slot is renamed to `mac_reminders` (2026-09-29) so the model's guess is
-  correct. Needs a gateway restart, and tool names change for every session.
+- **The caller-side slot name is part of the tool name, and getting it wrong costs four
+  retries.** In `~/.nanobot/config.json` the slot was `mac-reminders`, so tools were
+  `mcp_mac-reminders_reminders_read`; gpt-oss emitted `mcp_mac_reminders_…` with
+  underscores → `error parsing tool call` → 4 retries → model fallback. The rule: use
+  underscores, and name the slot after something the model has already seen in the repo.
+  It is `apple_bridge` (2026-09-29), so tools are `mcp_apple_bridge_reminders_read` and
+  `mcp_apple_bridge_events_create`. Renaming it needs `launchctl kickstart -k
+  gui/$(id -u)/ai.nanobot.gateway`, and tool names change for every open session.
+  `calhelper` was removed from that config in favour of this server — it covered a
+  strict subset (iCloud read, create, no update or delete) and having both registered
+  meant two overlapping calendar tool sets for a model to choose between.
 
 ## Recreating the signing identity (one-time, per machine)
 
