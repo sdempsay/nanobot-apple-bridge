@@ -17,18 +17,19 @@ See AGENTS.md for the full workflow.
 | 7 | Add NSCalendarsFullAccessUsageDescription to Info.plist | complete | #1 (closed — key present since `8891028`) |
 | 8 | Remove or refactor dead code in RemindersRules.swift:459 | pending | #2 |
 | 9 | Clarify MCPError reconnectable timeout distinction | pending | #3 |
-| 10 | `EventRecord.id` uses unstable `eventIdentifier`; use `calendarItemIdentifier` | review | #5 (done in `6b2426c`) |
-| 11 | Give `events_read` a real date window and report it in the result | review | #6 (done in `6b2426c`) |
-| 12 | Port the self-explaining read contract (`filters`/`note`, `events_upcoming`, `serverInstructions`) | review | #7 (done in `6b2426c`) |
+| 10 | `EventRecord.id` uses unstable `eventIdentifier`; use `calendarItemIdentifier` | complete | #5 (`6b2426c`) |
+| 11 | Give `events_read` a real date window and report it in the result | complete | #6 (`6b2426c`) |
+| 12 | Port the self-explaining read contract (`filters`/`note`, `events_upcoming`, `serverInstructions`) | complete | #7 (`6b2426c`) |
 | 13 | Decide recurrence, all-day `end`, and `notes` volume | pending | #8 (recurrence narrowed by #11) |
 | 14 | Test the calendar read path (none today) | pending | #9 (20 rules tests added; EventKit paths still bare) |
 | 15 | Sync docs with what actually shipped; rename LaunchAgent to `org.dempsay` | pending | #10 |
 | 16 | Add `events_create`/`update`/`delete`, refusing recurring events | pending | #11 |
 
-Calendar read shipped in `b134484` as a sizing prototype. Rows 10–12 land in
-`finish/calendar-read` (`6b2426c`), unmerged. Rows 11–12 gate calling the tools
-from a weak model; row 16 is the write surface and depends on nothing once 10
-lands.
+Calendar read shipped in `b134484` as a sizing prototype; rows 10–12 finished it
+in `6b2426c`, merged as #12 / `7a8d065`. 52 tests. Row 16 is the write surface,
+unblocked now that row 10 has landed. Row 15 is next: the Calendar usage string
+now claims "reads and writes" while only reading ships, and the LaunchAgent
+still says `com.org.dempsay` where the house rule is `org.dempsay`.
 
 **Recurrence decision, partial (row 13 / #8):** reads report occurrences, as the
 prototype already did. Writes are out of scope for recurring events entirely —
