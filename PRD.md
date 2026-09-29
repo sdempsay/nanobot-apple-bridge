@@ -208,22 +208,40 @@ remindd → SQLite ↔ CloudKit ↔ iCloud
 - `reminders_all` takes no arguments and maps to `reminders` with `list: "all"`, `status: "any"`, `limit: 100`. `"all"` is reserved: it reads every visible list and is refused for create and update, which need exactly one target list. A list literally named "all" stays reachable by its calendarIdentifier.
 - A blank optional string (`""` or spaces) is treated as omitted for `list`, `status`, `search`, `due_after`, `due_before`, `priority`, and `due`. It is not omitted for `notes` on update, where an empty string clears the note, nor for `title`, which must still be rejected.
 - A list argument may be a calendarIdentifier or a title. An identifier wins. A title is used only when one visible list has that name. "Recently Deleted" is excluded from that resolution. Omitting the list uses `defaultCalendarForNewReminders()`.
-- Read returns `{reminders, matched, truncated}` plus optional `{scope, filters, note}`. `scope` names what was read (`all 4 lists`, `list "Work"`, `default list "Reminders"`). `filters` echoes only the filters that narrowed the read — omitting `status` still filters to open, so it appears here; `flagged: false` and blank strings do not. `note` is present only when the page is likely to mislead (nothing matched, or a due window dropped undated reminders). All three are absent rather than null when they do not apply.
-- The default page is 50 and the maximum is 100. Open reminders come back soonest due first, undated last. A date due value is all-day in the helper's local zone; a zoned datetime is converted into that zone. `flagged: true` filters to flagged reminders, which EventKit cannot report, so the page is empty. `flagged: false` does not filter.
-- `flagged: true` fails on create and update with `The flag is not available through EventKit — omit the flagged field and retry.` (the message names the recovery, because agents hit it mid-call). `flagged: false` or omitted is a no-op on **both** create and update — every record reports `flagged: false`, so that end state already holds and update must tolerate a caller echoing a record back. Records always report `flagged: false`.
-- Public reminder keys are snake_case: `list_id`, `all_day`, `completion_time`. Omitted optional fields are absent rather than null.
-- Recurrence, alarms, tags, URLs, locations, subtasks, and the flag are not implemented.
+  - A helper that returns `{reminders, matched, truncated}` plus `{scope, filters, note}`.
+  - A page default of 50, max 100. Open reminders soonest due first, undated last. A bare date due value is all-day in the helper's local zone; a zoned datetime is converted into it. `flagged: true` filters to flagged reminders, which EventKit cannot report, so the page is empty. `flagged: false` does not filter.
+  - `flagged: true` fails on create and update with `The flag is not available through EventKit — omit the flagged field and retry.` The message names the recovery, because agents hit it mid-call. `flagged: false` or omitted is a no-op on **both** create and update — every record reports `flagged: false`, so that end state already holds and update must tolerate a caller echoing a record back.
+  - Public reminder keys are snake_case: `list_id`, `all_day`, `completion_time`. Omitted optional fields are absent rather than null.
+  - Recurrence, alarms, tags, URLs, locations, subtasks, and the flag are not implemented for **reminders**.
+
+### Calendar
+
+- `EventRecord.id` is `calendarItemIdentifier`, not `eventIdentifier` — Apple documents the latter as changing when an event moves calendars or re-syncs. `calendarItemIdentifier` can still be lost by a full iCloud sync, so every write error about a missing id says so and tells the caller to re-read.
+- `EventRecord.recurring` reports whether the event is part of a series. `EKEvent` has no `isRecurring`; recurrence is `recurrenceRules` on `EKCalendarItem`, and a non-nil **empty** array does not mean recurring — reading that wrong in the permissive direction would refuse ordinary events.
+- **Recurring events are readable and unwritable.** Create refuses any recurrence argument by name; update and delete refuse any event whose `recurring` is true, before touching a field. The refusal explains that apple-bridge will not guess between this occurrence and the whole series, because a model that retries after a bare "not allowed" will try a different field. Edit or delete a series in Calendar.app, not here.
+- An event that is one occurrence of a series is still refused. There is no occurrence-scoped write path: `save(_:span:commit:)` with `.thisEvent` on a series master silently diverges from what Calendar.app would do, and the user cannot see the difference.
+- Events save and remove through the span-based EventKit API, not the generic `EKCalendarItem` one the reminder path uses.
+- A date-only `start` creates an all-day event ending at midnight starting the next day, EventKit's exclusive convention, computed by adding a real day rather than `day + 1` so month end works. `all_day: true` forces it, and an `end` is ignored for all-day events, which always run one day.
+- `end` before `start` is refused. A timed create with no `end` defaults to one hour.
+- An update that changes nothing is refused (`Update needs at least one field to change.`) rather than silently saving a no-op.
+- `calendar: "all"` is a read scope. Writing to it is refused by name.
+- Writes are `retry: false`, like reminder writes: the change may already have been applied, and a timeout does not prove otherwise.
+- All-day `endDate` reads back as the last minute of the day (`23:59`), not the next midnight, whether we set the exclusive form or iCloud supplied the event. Create and read agree; do not "correct" the writer toward EventKit's documented convention.
+- Windowed reads: no `start_after` means now, no `start_before` means a 7-day lookahead, a window wider than 62 days is refused rather than trimmed, and `Recently Deleted` is skipped. Every page reports `window`, `filters`, and `scope`.
 
 ## Status
 
-Implemented and in daily use: Reminders lists + CRUD over MCP, 32 tests passing,
-verified against real user data (4 lists, 19 reminders). The design was captured
+Implemented and in daily use: **Reminders** lists + CRUD over MCP, and **Calendar**
+read + CRUD, 66 tests passing, verified against real user data (4 reminder lists,
+19 reminders; 15 calendars, 43 occurrences of 3 real recurring series refused for
+write with the series left intact). Recurring events are deliberately
+read-only — see the Calendar decisions above. The design was captured
 2026-09-28 and revised across two rounds of external design review (TCC
 responsible-process correction, `remindd` naming, second-grant Calendar, socket
 hardening, EventKit ceiling; then Apple Silicon signing requirements, Info.plist
 identity, LaunchAgent program/Aqua-session specifics, private-SPI fallback
 scoping, and `calendarIdentifier` wire addressing).
 
-Next milestone: **Calendar** — the second TCC grant flow
-(`NSCalendarsFullAccessUsageDescription` already ships in the Info.plist) and the
-calendar commands. Open items are tracked in `TODO.md`.
+Remaining calendar work is tracked in `TODO.md`; the open items are the
+EventKit-path tests (row 14) and the read-side record for recurrence
+(row 13).
